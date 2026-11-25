@@ -1,3 +1,4 @@
+import { useI18n, useTimeFormat } from './i18n';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
@@ -6,15 +7,23 @@ import {
 } from 'lucide-react';
 import { io } from 'socket.io-client';
 import type { AppNotification } from './api';
-import { api, socketUrl } from './api';
+import { api, mediaUrl, socketUrl } from './api';
 import { useAuth } from './auth';
 
-export function Avatar({ name, small = false }: { name: string; small?: boolean }) {
+export function Avatar({ name, small = false, src }: { name: string; small?: boolean; src?: string | null }) {
   const initials = name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
-  return <span className={`avatar ${small ? 'avatar-small' : ''}`}>{initials || 'U'}</span>;
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [src]);
+  const className = `avatar ${small ? 'avatar-small' : ''}`;
+  if (src && !failed) {
+    const resolvedSrc = /^(blob:|data:|https?:\/\/)/.test(src) ? src : mediaUrl(src);
+    return <span className={className}><img src={resolvedSrc} alt={name} onError={() => setFailed(true)} /></span>;
+  }
+  return <span className={className}>{initials || 'U'}</span>;
 }
 
 function ProfileMenu({ admin = false }: { admin?: boolean }) {
+  const { t } = useI18n();
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
@@ -49,21 +58,24 @@ function ProfileMenu({ admin = false }: { admin?: boolean }) {
     <div className="profile-wrap" ref={menuRef}>
       {error && <span className="sr-only" role="alert">{error}</span>}
       <button className="profile-button" onClick={() => setOpen(!open)} aria-expanded={open}>
-        <Avatar name={user?.name ?? 'Member'} small />
+        <Avatar name={user?.name ?? t('Member')} small src={user?.avatarUrl} />
         <span className="profile-name">{user?.name}</span>
         <ChevronDown size={15} />
       </button>
       {open && <div className="profile-menu">
         <div className="profile-menu-user"><strong>{user?.name}</strong><span>{user?.email}</span></div>
-        <button onClick={() => { navigate(admin ? '/admin/settings' : '/app/settings'); setOpen(false); }}><Settings size={15} /> Settings</button>
-        {admin && <button onClick={() => { navigate('/app'); setOpen(false); }}><ArrowUpRight size={15} /> Member view</button>}
-        <button onClick={() => void handleLogout()}><LogOut size={15} /> Sign out</button>
+        <button onClick={() => { navigate(admin ? '/admin/settings' : '/app/settings'); setOpen(false); }}><Settings size={15} /> {t('Settings')}</button>
+        {admin && <button onClick={() => { navigate('/app'); setOpen(false); }}><ArrowUpRight size={15} /> {t('Member view')}</button>}
+        <button onClick={() => void handleLogout()}><LogOut size={15} /> {t('Sign out')}</button>
       </div>}
     </div>
   );
 }
 
 function NotificationBell() {
+  const { t } = useI18n();
+  const { user } = useAuth();
+  const formatTime = useTimeFormat();
   const navigate = useNavigate();
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -140,7 +152,10 @@ function NotificationBell() {
         setUnreadCount((count) => Math.max(0, count - 1));
       }
       setOpen(false);
-      navigate(notification.href);
+      const href = user?.role === 'admin' && notification.href.startsWith('/app/')
+        ? notification.href.replace(/^\/app/, '/admin')
+        : notification.href;
+      navigate(href);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Unable to open this notification.');
     }
@@ -166,19 +181,21 @@ function NotificationBell() {
         <Bell size={18} />
         {unreadCount > 0 && <span className="notification-count">{unreadCount > 99 ? '99+' : unreadCount}</span>}
       </button>
-      {open && <section className="notification-panel" aria-label="Notifications">
-        <header><span><strong>Notifications</strong><small>{unreadCount ? `${unreadCount} unread` : 'You’re all caught up'}</small></span><button type="button" onClick={() => void markAllRead()} disabled={!unreadCount}><Check size={14} /> Mark all read</button></header>
+      {open && <section className="notification-panel" aria-label={t('Notifications')}>
+        <header><span><strong>{t('Notifications')}</strong><small>{unreadCount ? `${unreadCount} unread` : t('You’re all caught up')}</small></span><button type="button" onClick={() => void markAllRead()} disabled={!unreadCount}><Check size={14} /> {t('Mark all read')}</button></header>
         {error && <p className="notification-error" role="alert">{error}</p>}
         <div className="notification-list">
           {notifications.length ? notifications.map((notification) => <div key={notification.id} className={`notification-item ${notification.readAt ? '' : 'unread'}`}>
             <i />
             <button type="button" className="notification-open" onClick={() => void openNotification(notification)}>
-              <span><strong>{notification.title}</strong><small>{notification.body}</small><time>{new Intl.DateTimeFormat('en', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(notification.createdAt))}</time></span>
+              <span><strong>{notification.title}</strong><small>{notification.body}</small><time>{formatTime(notification.createdAt)}</time>
+                {notification.category === 'private_messages' && <em className="notification-go">{t('Go to message')} <ArrowUpRight size={12} /></em>}
+              </span>
             </button>
-            <button type="button" className="notification-delete" onClick={() => void deleteNotification(notification)} disabled={deletingId === notification.id} aria-label={`Delete notification: ${notification.title}`} title="Delete notification">
+            <button type="button" className="notification-delete" onClick={() => void deleteNotification(notification)} disabled={deletingId === notification.id} aria-label={`Delete notification: ${notification.title}`} title={t('Delete notification')}>
               <Trash2 size={15} />
             </button>
-          </div>) : <div className="notification-empty">Nothing new right now.</div>}
+          </div>) : <div className="notification-empty">{t('Nothing new right now.')}</div>}
         </div>
       </section>}
     </div>
@@ -193,6 +210,7 @@ const memberNav = [
 ];
 
 export function MemberLayout() {
+  const { t } = useI18n();
   const { user, siteSettings, preferences } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
   const isAdmin = user?.role === 'admin';
@@ -200,30 +218,30 @@ export function MemberLayout() {
     <div className={`app-shell theme-${preferences.theme}`}>
       <aside className={`sidebar ${mobileOpen ? 'sidebar-open' : ''}`}>
         <div className="brand-lockup"><span className="brand-mark">g</span><span>{siteSettings.siteName}</span></div>
-        <div className="sidebar-label">YOUR SPACE</div>
+        <div className="sidebar-label">{t('YOUR SPACE')}</div>
         <nav className="side-nav">
           {memberNav.map(({ to, label, icon: Icon, end }) => (
             <NavLink key={to} to={to} end={end} className={({ isActive }) => `side-link ${isActive ? 'active' : ''}`} onClick={() => setMobileOpen(false)}>
-              <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
+              <Icon size={18} strokeWidth={1.8} /><span>{t(label)}</span>
             </NavLink>
           ))}
           {isAdmin && <NavLink to="/admin" className="side-link admin-link" onClick={() => setMobileOpen(false)}>
-            <Shield size={18} strokeWidth={1.8} /><span>Admin dashboard</span><ArrowUpRight size={14} className="nav-trailing" />
+            <Shield size={18} strokeWidth={1.8} /><span>{t('Admin dashboard')}</span><ArrowUpRight size={14} className="nav-trailing" />
           </NavLink>}
         </nav>
         <div className="sidebar-bottom">
-          <div className="sidebar-help"><div className="help-icon"><CircleHelp size={17} /></div><div><strong>Need a hand?</strong><span>We’re here to help.</span></div><ArrowUpRight size={14} /></div>
-          <div className="sidebar-user"><Avatar name={user?.name ?? 'Member'} /><div className="sidebar-user-copy"><strong>{user?.name}</strong><span>{isAdmin ? 'Administrator' : 'Community member'}</span></div><ProfileMenu /></div>
+          <div className="sidebar-help"><div className="help-icon"><CircleHelp size={17} /></div><div><strong>{t('Need a hand?')}</strong><span>{t('We’re here to help.')}</span></div><ArrowUpRight size={14} /></div>
+          <div className="sidebar-user"><Avatar name={user?.name ?? t('Member')} src={user?.avatarUrl} /><div className="sidebar-user-copy"><strong>{user?.name}</strong><span>{isAdmin ? t('Administrator') : t('Community member')}</span></div><ProfileMenu /></div>
         </div>
       </aside>
-      {mobileOpen && <button className="mobile-backdrop" aria-label="Close menu" onClick={() => setMobileOpen(false)} />}
+      {mobileOpen && <button className="mobile-backdrop" aria-label={t('Close menu')} onClick={() => setMobileOpen(false)} />}
       <main className="main-panel">
         <header className="topbar">
-          <button className="mobile-menu-button" onClick={() => setMobileOpen(!mobileOpen)} aria-label={mobileOpen ? 'Close menu' : 'Open menu'}>
+          <button className="mobile-menu-button" onClick={() => setMobileOpen(!mobileOpen)} aria-label={mobileOpen ? t('Close menu') : t('Open menu')}>
             {mobileOpen ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <div className="breadcrumb"><span>Community</span><span className="crumb-slash">/</span><strong>My space</strong></div>
-          <div className="topbar-actions"><span className="topbar-date">A good day to be here</span><NotificationBell /><ProfileMenu /></div>
+          <div className="breadcrumb"><span>{t('Community')}</span><span className="crumb-slash">/</span><strong>{t('My space')}</strong></div>
+          <div className="topbar-actions"><span className="topbar-date">{t('A good day to be here')}</span><NotificationBell /><ProfileMenu /></div>
         </header>
         <div className="page-content"><Outlet /></div>
       </main>
@@ -242,36 +260,37 @@ const adminNav = [
 ];
 
 export function AdminLayout() {
+  const { t } = useI18n();
   const { user, siteSettings, preferences } = useAuth();
   const [mobileOpen, setMobileOpen] = useState(false);
   return (
     <div className={`app-shell admin-shell theme-${preferences.theme}`}>
       <aside className={`sidebar admin-sidebar ${mobileOpen ? 'sidebar-open' : ''}`}>
         <div className="brand-lockup"><span className="brand-mark">g</span><span>{siteSettings.siteName}</span></div>
-        <div className="admin-workspace"><span className="workspace-icon"><Shield size={17} /></span><span><strong>Workspace</strong><small>ADMIN CONSOLE</small></span><ChevronDown size={15} /></div>
-        <div className="sidebar-label">MANAGE</div>
+        <div className="admin-workspace"><span className="workspace-icon"><Shield size={17} /></span><span><strong>{t('Workspace')}</strong><small>{t('ADMIN CONSOLE')}</small></span><ChevronDown size={15} /></div>
+        <div className="sidebar-label">{t('MANAGE')}</div>
         <nav className="side-nav">
           {adminNav.map(({ to, label, icon: Icon, end }) => (
             <NavLink key={to} to={to} end={end} className={({ isActive }) => `side-link ${isActive ? 'active' : ''}`} onClick={() => setMobileOpen(false)}>
-              <Icon size={18} strokeWidth={1.8} /><span>{label}</span>
+              <Icon size={18} strokeWidth={1.8} /><span>{t(label)}</span>
             </NavLink>
           ))}
         </nav>
         <div className="admin-rail-divider" />
-        <NavLink to="/app" className="side-link member-view-link"><ArrowUpRight size={17} /><span>Go to member view</span></NavLink>
+        <NavLink to="/app" className="side-link member-view-link"><ArrowUpRight size={17} /><span>{t('Go to member view')}</span></NavLink>
         <div className="sidebar-bottom">
-          <div className="sidebar-help"><div className="help-icon"><CircleHelp size={17} /></div><div><strong>Admin guide</strong><span>Learn how to manage.</span></div><ArrowUpRight size={14} /></div>
-          <div className="sidebar-user"><Avatar name={user?.name ?? 'Admin'} /><div className="sidebar-user-copy"><strong>{user?.name}</strong><span>Administrator</span></div><ProfileMenu admin /></div>
+          <div className="sidebar-help"><div className="help-icon"><CircleHelp size={17} /></div><div><strong>{t('Admin guide')}</strong><span>{t('Learn how to manage.')}</span></div><ArrowUpRight size={14} /></div>
+          <div className="sidebar-user"><Avatar name={user?.name ?? t('Admin')} src={user?.avatarUrl} /><div className="sidebar-user-copy"><strong>{user?.name}</strong><span>{t('Administrator')}</span></div><ProfileMenu admin /></div>
         </div>
       </aside>
-      {mobileOpen && <button className="mobile-backdrop" aria-label="Close menu" onClick={() => setMobileOpen(false)} />}
+      {mobileOpen && <button className="mobile-backdrop" aria-label={t('Close menu')} onClick={() => setMobileOpen(false)} />}
       <main className="main-panel">
         <header className="topbar">
-          <button className="mobile-menu-button" onClick={() => setMobileOpen(!mobileOpen)} aria-label={mobileOpen ? 'Close menu' : 'Open menu'}>
+          <button className="mobile-menu-button" onClick={() => setMobileOpen(!mobileOpen)} aria-label={mobileOpen ? t('Close menu') : t('Open menu')}>
             {mobileOpen ? <X size={20} /> : <Menu size={20} />}
           </button>
-          <div className="breadcrumb"><span>Workspace</span><span className="crumb-slash">/</span><strong>Admin console</strong></div>
-          <div className="topbar-actions"><span className="secure-label"><Shield size={14} /> Admin access</span><NotificationBell /><ProfileMenu admin /></div>
+          <div className="breadcrumb"><span>{t('Workspace')}</span><span className="crumb-slash">/</span><strong>{t('Admin console')}</strong></div>
+          <div className="topbar-actions"><span className="secure-label"><Shield size={14} /> {t('Admin access')}</span><NotificationBell /><ProfileMenu admin /></div>
         </header>
         <div className="page-content"><Outlet /></div>
       </main>

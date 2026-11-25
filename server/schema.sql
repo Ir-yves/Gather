@@ -11,6 +11,9 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash VARCHAR(255) NOT NULL,
   role ENUM('admin', 'user') NOT NULL DEFAULT 'user',
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  avatar_image LONGBLOB NULL,
+  avatar_mime VARCHAR(100) NULL,
+  avatar_updated_at TIMESTAMP NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -159,6 +162,16 @@ CREATE TABLE IF NOT EXISTS private_messages (
   CONSTRAINT fk_private_message_conversation FOREIGN KEY (conversation_id) REFERENCES private_conversations(id) ON DELETE CASCADE,
   CONSTRAINT fk_private_message_sender FOREIGN KEY (sender_id) REFERENCES users(id) ON DELETE CASCADE,
   CONSTRAINT fk_private_message_reply FOREIGN KEY (reply_to_message_id) REFERENCES private_messages(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS private_message_reads (
+  message_id BIGINT UNSIGNED NOT NULL,
+  user_id CHAR(36) NOT NULL,
+  read_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (message_id, user_id),
+  INDEX idx_private_message_reads_user (user_id),
+  CONSTRAINT fk_private_message_read_message FOREIGN KEY (message_id) REFERENCES private_messages(id) ON DELETE CASCADE,
+  CONSTRAINT fk_private_message_read_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS livestreams (

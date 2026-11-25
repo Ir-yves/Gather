@@ -1,28 +1,32 @@
+import { useI18n } from './i18n';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from './auth';
 import { AdminLayout, MemberLayout } from './components';
-import { AdminAnalyticsPage, AdminContentPage, AdminHomePage, AdminLivePage, AdminUsersPage, LoginPage, MemberPage, MessagesPage, RegisterPage } from './pages';
+import { AdminAnalyticsPage, AdminContentPage, AdminHomePage, AdminLivePage, AdminUsersPage, ForgotPasswordPage, LoginPage, MemberPage, MessagesPage, RegisterPage, ResetPasswordPage } from './pages';
 import { SettingsPage } from './settings-page';
 
 function RequireRole({ children, role }: { children: JSX.Element; role: 'admin' | 'user' }) {
+  const { t } = useI18n();
   const { user, loading } = useAuth();
   const location = useLocation();
-  if (loading) return <div className="screen-loading"><span className="spinner" /> Loading your space…</div>;
+  if (loading) return <div className="screen-loading"><span className="spinner" /> {t('Loading your space…')}</div>;
   if (!user) return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   if (role === 'admin' && user.role !== 'admin') return <Navigate to="/app" replace />;
   return children;
 }
 
 function LoginRedirect() {
+  const { t } = useI18n();
   const { user, loading } = useAuth();
-  if (loading) return <div className="screen-loading"><span className="spinner" /> Loading your space…</div>;
+  if (loading) return <div className="screen-loading"><span className="spinner" /> {t('Loading your space…')}</div>;
   if (user) return <Navigate to={user.role === 'admin' ? '/admin' : '/app'} replace />;
   return <LoginPage />;
 }
 
 function RegisterRedirect() {
+  const { t } = useI18n();
   const { user, loading } = useAuth();
-  if (loading) return <div className="screen-loading"><span className="spinner" /> Loading your space…</div>;
+  if (loading) return <div className="screen-loading"><span className="spinner" /> {t('Loading your space…')}</div>;
   if (user) return <Navigate to={user.role === 'admin' ? '/admin' : '/app'} replace />;
   return <RegisterPage />;
 }
@@ -33,6 +37,8 @@ export default function App() {
       <Route path="/" element={<Navigate to="/login" replace />} />
       <Route path="/login" element={<LoginRedirect />} />
       <Route path="/register" element={<RegisterRedirect />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route path="/app" element={<RequireRole role="user"><MemberLayout /></RequireRole>}>
         <Route index element={<MemberPage />} />
         <Route path="messages" element={<MessagesPage />} />

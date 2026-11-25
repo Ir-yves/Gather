@@ -40,17 +40,18 @@ app.use(express.json({ limit: '1mb' }));
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 app.use('/api', verifyOrigin, router);
 
-app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (error instanceof UploadValidationError) {
     res.status(400).json({ error: error.message });
     return;
   }
   if (error instanceof multer.MulterError) {
+    const isAvatar = req.path.includes('/account/avatar');
     res.status(error.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({
       error: error.code === 'LIMIT_FILE_SIZE'
-        ? 'Each uploaded file must be 100 MB or smaller.'
+        ? (isAvatar ? 'Your profile image must be 2 MB or smaller.' : 'Each uploaded file must be 100 MB or smaller.')
         : error.code === 'LIMIT_FILE_COUNT'
-          ? 'You can upload at most 5 files at a time.'
+          ? (isAvatar ? 'Choose one profile image.' : 'You can upload at most 5 files at a time.')
           : 'The uploaded files could not be accepted.'
     });
     return;
@@ -113,12 +114,39 @@ const forwardSchema = z.object({
   recipientIds: z.array(z.string().uuid()).min(1).max(20)
 });
 const privateForwardSchema = forwardSchema.extend({ conversationId: z.string().uuid() });
+const markReadSchema = z.object({
+  conversationId: z.string().uuid(),
+  messageIds: z.array(z.number().int().positive()).min(1).max(100)
+});
+const groupDeleteSchema = z.object({ conversationId: z.string().uuid() });
+const groupMemberSchema = z.object({ conversationId: z.string().uuid(), memberId: z.string().uuid() });
+const callStartSchema = z.object({
+  conversationId: z.string().uuid(),
+  callId: z.string().uuid(),
+  mode: z.enum(['audio', 'video'])
+});
+const callResponseSchema = z.object({
+  conversationId: z.string().uuid(),
+  callId: z.string().uuid(),
+  accept: z.boolean()
+});
+const callEndSchema = z.object({ conversationId: z.string().uuid(), callId: z.string().uuid() });
+
+interface ActiveCallSignal {
+  conversationId: string;
+  callerId: string;
+  participantIds: string[];
+  mode: 'audio' | 'video';
+  createdAt: number;
+}
+const activeCalls = new Map<string, ActiveCallSignal>();
 
 interface ChatActionResult {
   success: boolean;
   error?: string;
   message?: ChatMessagePayload;
   forwardedCount?: number;
+  member?: { id: string; name: string; role: 'admin' | 'user' };
 }
 
 interface ChatMessagePayload {
@@ -130,6 +158,7 @@ interface ChatMessagePayload {
   createdAt: Date | string;
   userId: string;
   name: string;
+  readBy?: string[];
 }
 
 interface PrivateConversationContext {
@@ -318,13 +347,15 @@ io.on('connection', (socket) => {
         replyTo,
         createdAt: new Date(),
         userId: user.id,
-        name: sender.name
+        name: sender.name,
+        readBy: []
       };
+      const href = `/app/messages?conversationId=${parsed.data.conversationId}&messageId=${result.insertId}`;
       void createNotifications(
         'private_messages',
         `${sender.name} sent a message`,
         parsed.data.message,
-        '/app/messages',
+        href,
         conversation.participants.filter((participantId) => participantId !== user.id)
       ).catch((error: unknown) => console.error('Unable to notify members about a private message:', error));
       emitPrivateMessage(conversation, message, io);
@@ -360,6 +391,10 @@ io.on('connection', (socket) => {
         acknowledge?.({ success: false, error: 'This message is no longer available.' });
         return;
       }
+      if (rows[0].sender_id !== user.id) {
+        acknowledge?.({ success: false, error: 'You can only delete your own messages.' });
+        return;
+      }
       await db.execute('DELETE FROM private_messages WHERE id = ?', [parsed.data.messageId]);
       emitToConversationMembers(conversation, 'private:deleted', {
         conversationId: parsed.data.conversationId,
@@ -369,6 +404,49 @@ io.on('connection', (socket) => {
     } catch (error) {
       console.error('Unable to delete private message:', error);
       acknowledge?.({ success: false, error: 'The private message could not be deleted. Please try again.' });
+    }
+  });
+
+  socket.on('private:mark-read', async (input: unknown, acknowledge?: (result: ChatActionResult) => void) => {
+    const parsed = markReadSchema.safeParse(input);
+    if (!parsed.success) {
+      acknowledge?.({ success: false, error: 'Those messages could not be marked as read.' });
+      return;
+    }
+    try {
+      if (!await getActiveSocketUser(user.id)) {
+        socket.disconnect(true);
+        acknowledge?.({ success: false, error: 'Your account is no longer active.' });
+        return;
+      }
+      const conversation = await getPrivateConversationForUser(parsed.data.conversationId, user.id);
+      if (!conversation) {
+        acknowledge?.({ success: false, error: 'This conversation is not available.' });
+        return;
+      }
+      const ids = parsed.data.messageIds;
+      const [rows] = await db.execute<(RowDataPacket & { id: number })[]>(
+        `SELECT id FROM private_messages
+         WHERE conversation_id = ? AND sender_id <> ? AND id IN (${ids.map(() => '?').join(', ')})`,
+        [conversation.id, user.id, ...ids]
+      );
+      if (rows.length) {
+        await db.execute(
+          `INSERT IGNORE INTO private_message_reads (message_id, user_id) VALUES ${rows.map(() => '(?, ?)').join(', ')}`,
+          rows.flatMap((row) => [row.id, user.id])
+        );
+        for (const row of rows) {
+          emitToConversationMembers(conversation, 'private:message-read', {
+            conversationId: conversation.id,
+            messageId: Number(row.id),
+            userId: user.id
+          }, io);
+        }
+      }
+      acknowledge?.({ success: true });
+    } catch (error) {
+      console.error('Unable to mark private messages as read:', error);
+      acknowledge?.({ success: false, error: 'The messages could not be marked as read.' });
     }
   });
 
@@ -439,6 +517,245 @@ io.on('connection', (socket) => {
       acknowledge?.({ success: false, error: 'Group members could not be notified.' });
     }
   });
+
+  socket.on('private:delete-group', async (input: unknown, acknowledge?: (result: ChatActionResult) => void) => {
+    const parsed = groupDeleteSchema.safeParse(input);
+    if (!parsed.success) {
+      acknowledge?.({ success: false, error: 'That group could not be deleted.' });
+      return;
+    }
+    try {
+      const actor = await getActiveSocketUser(user.id);
+      if (!actor || actor.role !== 'admin') {
+        acknowledge?.({ success: false, error: 'Only administrators can delete group conversations.' });
+        return;
+      }
+      const conversation = await getGroupConversation(parsed.data.conversationId);
+      if (!conversation) {
+        acknowledge?.({ success: false, error: 'Group conversation not found.' });
+        return;
+      }
+      // Members and messages are removed by the foreign key cascades.
+      const [result] = await db.execute<ResultSetHeader>(
+        `DELETE FROM private_conversations WHERE id = ? AND conversation_type = 'group'`,
+        [conversation.id]
+      );
+      if (!result.affectedRows) {
+        acknowledge?.({ success: false, error: 'The group could not be deleted. Please try again.' });
+        return;
+      }
+      emitToConversationMembers(conversation, 'private:conversation-deleted', {
+        conversationId: conversation.id
+      }, io);
+      acknowledge?.({ success: true });
+    } catch (error) {
+      console.error('Unable to delete group conversation:', error);
+      acknowledge?.({ success: false, error: 'The group could not be deleted. Please try again.' });
+    }
+  });
+
+  socket.on('private:add-group-member', async (input: unknown, acknowledge?: (result: ChatActionResult) => void) => {
+    const parsed = groupMemberSchema.safeParse(input);
+    if (!parsed.success) {
+      acknowledge?.({ success: false, error: 'That member could not be added.' });
+      return;
+    }
+    try {
+      const actor = await getActiveSocketUser(user.id);
+      if (!actor || actor.role !== 'admin') {
+        acknowledge?.({ success: false, error: 'Only administrators can manage group members.' });
+        return;
+      }
+      const conversation = await getGroupConversation(parsed.data.conversationId);
+      if (!conversation) {
+        acknowledge?.({ success: false, error: 'Group conversation not found.' });
+        return;
+      }
+      const [accounts] = await db.execute<(RowDataPacket & {
+        id: string; name: string; role: 'admin' | 'user'; is_active: number;
+      })[]>('SELECT id, name, role, is_active FROM users WHERE id = ? LIMIT 1', [parsed.data.memberId]);
+      const target = accounts[0];
+      if (!target?.is_active) {
+        acknowledge?.({ success: false, error: 'This member is unavailable.' });
+        return;
+      }
+      if (conversation.participants.includes(target.id)) {
+        acknowledge?.({ success: false, error: 'That member is already in the group.' });
+        return;
+      }
+      await db.execute(
+        'INSERT INTO private_conversation_members (conversation_id, user_id) VALUES (?, ?)',
+        [conversation.id, target.id]
+      );
+      await db.execute('UPDATE private_conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [conversation.id]);
+      const updated = await getGroupConversation(conversation.id);
+      if (updated) {
+        emitToConversationMembers(updated, 'private:group-members-updated', { conversationId: updated.id }, io);
+        emitToConversationMembers(updated, 'private:conversation-updated', { conversationId: updated.id }, io);
+      }
+      acknowledge?.({ success: true, member: { id: target.id, name: target.name, role: target.role } });
+    } catch (error) {
+      console.error('Unable to add group member:', error);
+      acknowledge?.({ success: false, error: 'The member could not be added. Please try again.' });
+    }
+  });
+
+  socket.on('private:remove-group-member', async (input: unknown, acknowledge?: (result: ChatActionResult) => void) => {
+    const parsed = groupMemberSchema.safeParse(input);
+    if (!parsed.success) {
+      acknowledge?.({ success: false, error: 'That member could not be removed.' });
+      return;
+    }
+    try {
+      const actor = await getActiveSocketUser(user.id);
+      if (!actor || actor.role !== 'admin') {
+        acknowledge?.({ success: false, error: 'Only administrators can manage group members.' });
+        return;
+      }
+      const conversation = await getGroupConversation(parsed.data.conversationId);
+      if (!conversation) {
+        acknowledge?.({ success: false, error: 'Group conversation not found.' });
+        return;
+      }
+      if (!conversation.participants.includes(parsed.data.memberId)) {
+        acknowledge?.({ success: false, error: 'That member is not in the group.' });
+        return;
+      }
+      if (conversation.participants.length <= 1) {
+        acknowledge?.({ success: false, error: 'A group needs at least one member.' });
+        return;
+      }
+      const [result] = await db.execute<ResultSetHeader>(
+        'DELETE FROM private_conversation_members WHERE conversation_id = ? AND user_id = ?',
+        [conversation.id, parsed.data.memberId]
+      );
+      if (!result.affectedRows) {
+        acknowledge?.({ success: false, error: 'The member could not be removed. Please try again.' });
+        return;
+      }
+      await db.execute('UPDATE private_conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', [conversation.id]);
+      // The removed member no longer has access to this conversation.
+      io.to(parsed.data.memberId).emit('private:conversation-deleted', { conversationId: conversation.id });
+      const updated = await getGroupConversation(conversation.id);
+      if (updated) {
+        emitToConversationMembers(updated, 'private:group-members-updated', { conversationId: updated.id }, io);
+        emitToConversationMembers(updated, 'private:conversation-updated', { conversationId: updated.id }, io);
+      }
+      acknowledge?.({ success: true });
+    } catch (error) {
+      console.error('Unable to remove group member:', error);
+      acknowledge?.({ success: false, error: 'The member could not be removed. Please try again.' });
+    }
+  });
+
+  socket.on('private:call', async (input: unknown, acknowledge?: (result: ChatActionResult) => void) => {
+    const parsed = callStartSchema.safeParse(input);
+    if (!parsed.success) {
+      acknowledge?.({ success: false, error: 'That call could not be started.' });
+      return;
+    }
+    try {
+      const caller = await getActiveSocketUser(user.id);
+      if (!caller) {
+        socket.disconnect(true);
+        acknowledge?.({ success: false, error: 'Your account is no longer active.' });
+        return;
+      }
+      const conversation = await getPrivateConversationForUser(parsed.data.conversationId, user.id);
+      if (!conversation) {
+        acknowledge?.({ success: false, error: 'This conversation is not available.' });
+        return;
+      }
+      const recipients = conversation.participants.filter((participantId) => participantId !== user.id);
+      if (!recipients.length) {
+        acknowledge?.({ success: false, error: 'There is nobody else to call in this conversation.' });
+        return;
+      }
+      for (const [callId, call] of activeCalls) {
+        if (Date.now() - call.createdAt > 60000) activeCalls.delete(callId);
+      }
+      activeCalls.set(parsed.data.callId, {
+        conversationId: conversation.id,
+        callerId: user.id,
+        participantIds: conversation.participants,
+        mode: parsed.data.mode,
+        createdAt: Date.now()
+      });
+      for (const recipientId of recipients) {
+        io.to(recipientId).emit('private:call-incoming', {
+          callId: parsed.data.callId,
+          conversationId: conversation.id,
+          mode: parsed.data.mode,
+          from: { id: user.id, name: caller.name }
+        });
+      }
+      acknowledge?.({ success: true });
+    } catch (error) {
+      console.error('Unable to start private call:', error);
+      acknowledge?.({ success: false, error: 'The call could not be started. Please try again.' });
+    }
+  });
+
+  socket.on('private:call-respond', async (input: unknown, acknowledge?: (result: ChatActionResult) => void) => {
+    const parsed = callResponseSchema.safeParse(input);
+    if (!parsed.success) {
+      acknowledge?.({ success: false, error: 'That call could not be answered.' });
+      return;
+    }
+    try {
+      const responder = await getActiveSocketUser(user.id);
+      if (!responder) {
+        socket.disconnect(true);
+        acknowledge?.({ success: false, error: 'Your account is no longer active.' });
+        return;
+      }
+      const call = activeCalls.get(parsed.data.callId);
+      if (!call || call.conversationId !== parsed.data.conversationId) {
+        acknowledge?.({ success: false, error: 'This call is no longer available.' });
+        return;
+      }
+      if (!call.participantIds.includes(user.id)) {
+        acknowledge?.({ success: false, error: 'You are not part of this call.' });
+        return;
+      }
+      if (!parsed.data.accept) activeCalls.delete(parsed.data.callId);
+      io.to(call.callerId).emit('private:call-response', {
+        callId: parsed.data.callId,
+        conversationId: call.conversationId,
+        mode: call.mode,
+        accept: parsed.data.accept,
+        responder: { id: user.id, name: responder.name }
+      });
+      acknowledge?.({ success: true });
+    } catch (error) {
+      console.error('Unable to answer private call:', error);
+      acknowledge?.({ success: false, error: 'The call could not be answered. Please try again.' });
+    }
+  });
+
+  socket.on('private:call-end', async (input: unknown, acknowledge?: (result: ChatActionResult) => void) => {
+    const parsed = callEndSchema.safeParse(input);
+    if (!parsed.success) {
+      acknowledge?.({ success: false, error: 'That call could not be ended.' });
+      return;
+    }
+    try {
+      const conversation = await getPrivateConversationForUser(parsed.data.conversationId, user.id);
+      if (!conversation) {
+        acknowledge?.({ success: false, error: 'This call is no longer available.' });
+        return;
+      }
+      activeCalls.delete(parsed.data.callId);
+      emitToConversationMembers(conversation, 'private:call-ended', {
+        callId: parsed.data.callId,
+        conversationId: conversation.id
+      }, io);
+      acknowledge?.({ success: true });
+    } catch (error) {
+      console.error('Unable to end private call:', error);
+      acknowledge?.({ success: false, error: 'The call could not be ended. Please try again.' });
+    }
+  });
 });
 
 async function getActiveSocketUser(userId: string): Promise<{ id: string; name: string; role: 'admin' | 'user' } | null> {
@@ -490,6 +807,20 @@ async function getPrivateConversationForUser(
   return { id: row.id, type: 'group', participants: members.map((member) => member.user_id) };
 }
 
+async function getGroupConversation(conversationId: string): Promise<PrivateConversationContext | null> {
+  const [rows] = await db.execute<(RowDataPacket & { id: string })[]>(
+    `SELECT id FROM private_conversations
+     WHERE id = ? AND conversation_type = 'group' LIMIT 1`,
+    [conversationId]
+  );
+  if (!rows[0]) return null;
+  const [members] = await db.execute<(RowDataPacket & { user_id: string })[]>(
+    'SELECT user_id FROM private_conversation_members WHERE conversation_id = ?',
+    [conversationId]
+  );
+  return { id: conversationId, type: 'group', participants: members.map((member) => member.user_id) };
+}
+
 function emitToConversationMembers(
   conversation: PrivateConversationContext,
   event: string,
@@ -523,7 +854,7 @@ async function forwardToMembers(
   if (!recipients.length) throw new Error('Choose at least one other member.');
 
   const connection = await database.getConnection();
-  const emitted: Array<{ conversation: PrivateConversationContext; message: ChatMessagePayload }> = [];
+  const emitted: Array<{ recipientId: string; conversation: PrivateConversationContext; message: ChatMessagePayload }> = [];
   try {
     const placeholders = recipients.map(() => '?').join(', ');
     const [activeMembers] = await connection.execute<(RowDataPacket & { id: string })[]>(
@@ -562,6 +893,7 @@ async function forwardToMembers(
         conversation.id
       ]);
       emitted.push({
+        recipientId,
         conversation: {
           id: conversation.id,
           type: 'direct',
@@ -574,7 +906,8 @@ async function forwardToMembers(
           forwarded: true,
           createdAt: new Date(),
           userId: sender.id,
-          name: sender.name
+          name: sender.name,
+          readBy: []
         }
       });
     }
@@ -587,12 +920,17 @@ async function forwardToMembers(
   }
 
   for (const entry of emitted) emitPrivateMessage(entry.conversation, entry.message, socketServer);
+  const notificationLinks = new Map(emitted.map((entry) => [
+    entry.recipientId,
+    `/app/messages?conversationId=${entry.message.conversationId}&messageId=${entry.message.id}`
+  ]));
   void createNotifications(
     'private_messages',
     `${sender.name} forwarded a message`,
     messageText,
     '/app/messages',
-    recipients
+    recipients,
+    (userId) => notificationLinks.get(userId) ?? '/app/messages'
   ).catch((error: unknown) => console.error('Unable to notify members about a forwarded message:', error));
   return emitted.length;
 }

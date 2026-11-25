@@ -77,6 +77,7 @@ export interface User {
   name: string;
   email: string;
   role: 'admin' | 'user';
+  avatarUrl: string | null;
 }
 
 export interface UserPreferences {
@@ -105,11 +106,11 @@ export interface ContentItem {
   id: string;
   title: string;
   body: string;
-  imageUrl: string | null;
   published: boolean;
   createdAt: string;
   updatedAt: string;
   authorName: string;
+  authorAvatarUrl: string | null;
   likesCount: number;
   liked: boolean;
   assets: ContentAsset[];

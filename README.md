@@ -11,7 +11,7 @@ A React + Express + MySQL community app with role-based admin tools, protected m
 ## Setup
 
 1. Install dependencies from the project root with `npm install`.
-2. Create the database and tables by running `server/schema.sql` with your MySQL client. For an existing installation, run migrations `001_content_assets.sql` through `008_livestream_recordings.sql` in numeric order.
+2. Create the database and tables by running `server/schema.sql` with your MySQL client. For an existing installation, run migrations `001_content_assets.sql` through `012_private_message_reads.sql` in numeric order.
 3. Copy `server/.env.example` to `server/.env`, then set the MySQL credentials, a unique long `JWT_SECRET`, and the LiveKit URL/key/secret.
 4. Create an admin account by registering normally, then promote that account in MySQL:
 
@@ -30,7 +30,7 @@ Livestream replay requires a private S3-compatible bucket and LiveKit Egress. Se
 The repository includes a Vercel configuration for the client and a Render Blueprint for the API. The Render Blueprint uses a paid Starter web service and a 1 GB persistent disk for uploaded documents/videos; without persistent storage, uploads would be lost when Render replaces the service.
 
 1. Push this repository to GitHub and import it into Vercel and Render from the repository root.
-2. In Aiven, use a MySQL service and create the application database. Apply `server/schema.sql`, followed by migrations `001_content_assets.sql` through `008_livestream_recordings.sql` in numeric order. Set the Aiven hostname, port, username, password, and database name in the Render service environment.
+2. In Aiven, use a MySQL service and create the application database. Apply `server/schema.sql`, followed by migrations `001_content_assets.sql` through `012_private_message_reads.sql` in numeric order. Set the Aiven hostname, port, username, password, and database name in the Render service environment.
 3. Download the Aiven CA certificate and set its contents as `MYSQL_SSL_CA` in Render. The API requires this certificate in production and verifies the database TLS connection.
 4. Configure the Render Blueprint’s `CLIENT_ORIGIN` as the exact deployed Vercel origin (scheme and hostname, with no trailing path). Set the LiveKit URL, API key, and secret in Render if livestreaming is enabled. Keep provider secrets in their dashboards, never in Git.
 5. In Vercel, set `VITE_API_URL` to `https://<render-host>/api` and `VITE_SOCKET_URL` to `https://<render-host>`, then redeploy the client. The Vercel rewrite serves the React app for client-side routes.
@@ -45,9 +45,9 @@ Logged-in members can like or unlike community updates, individual documents and
 
 Admins can review unique-member views, like counts, and the members who liked each update, attachment, or livestream from **Views & likes**. A feed view is recorded when the member feed loads; document/video views are recorded when a file is opened (downloads are not counted); a livestream view is recorded after a member connects successfully. Repeated views by the same member count once per item.
 
-Members and admins can privately message active accounts from **Private messages**. Admins can create named group conversations with active members; participants can reply to messages, and messages can be forwarded to up to 20 members at a time. Participants can delete private messages for everyone in that conversation; members can delete their own community-room messages, and admins can moderate any community-room message.
+Members and admins can privately message active accounts from **Private messages**. Admins can create named group conversations with active members; participants can reply to messages, and messages can be forwarded to up to 20 members at a time. Participants can delete private messages for everyone in that conversation.
 
-Admins and members can update their profile, password, appearance, and in-app notification preferences from **Settings**. Admins can also update the site name and member welcome message; member account roles and activation remain managed from **Members**. In-app notifications are available for private messages, newly published content, and livestreams.
+Admins and members can update their profile, password, appearance, and in-app notification preferences from **Settings**. Admins can also update the site name and member welcome message; member account roles and activation remain managed from **Members**. In-app notifications are available for private messages, newly published content, and livestreams. Successful create, save, and delete actions show a brief on-screen confirmation, and the interface is available in English, Kinyarwanda, and French. Members who forget their password can request a reset link from the sign-in page; configure `SMTP_*` so the one-time link (valid for 30 minutes) can be emailed to them.
 
 ## Security notes
 

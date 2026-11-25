@@ -27,7 +27,8 @@ export async function createNotifications(
   title: string,
   body: string,
   href: string,
-  recipientIds?: string[]
+  recipientIds?: string[],
+  hrefForRecipient?: (userId: string) => string
 ): Promise<void> {
   const preferenceColumn = {
     private_messages: 'notify_private_messages',
@@ -56,7 +57,7 @@ export async function createNotifications(
     category,
     title,
     body: body.slice(0, 500),
-    href,
+    href: hrefForRecipient?.(recipient.id) ?? href,
     createdAt: new Date().toISOString(),
     readAt: null
   }));

@@ -24,7 +24,13 @@ const configSchema = z.object({
   RECORDING_S3_REGION: z.string().default(''),
   RECORDING_S3_BUCKET: z.string().default(''),
   RECORDING_S3_ACCESS_KEY: z.string().default(''),
-  RECORDING_S3_SECRET_KEY: z.string().default('')
+  RECORDING_S3_SECRET_KEY: z.string().default(''),
+  SMTP_HOST: z.string().default(''),
+  SMTP_PORT: z.coerce.number().int().positive().default(587),
+  SMTP_SECURE: z.enum(['true', 'false']).default('false'),
+  SMTP_USER: z.string().default(''),
+  SMTP_PASSWORD: z.string().default(''),
+  SMTP_FROM: z.string().default('')
 }).superRefine((values, context) => {
   if (values.NODE_ENV === 'production' && !values.MYSQL_SSL_CA.trim()) {
     context.addIssue({

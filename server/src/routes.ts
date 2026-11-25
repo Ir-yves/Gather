@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { Router, type Response } from 'express';
@@ -11,10 +11,12 @@ import { config, isLiveKitConfigured, isStreamRecordingConfigured } from './conf
 import { clearSessionCookie, requireAuth, requireRole, setSessionCookie } from './auth.js';
 import { db } from './db.js';
 import { createNotifications, type NotificationCategory } from './notifications.js';
+import { isPasswordResetEmailConfigured, sendPasswordResetEmail } from './mailer.js';
 import { asyncHandler, parseBody } from './http.js';
 import type { AuthRequest, AuthUser, UserRole } from './types.js';
 import {
-  contentUpload, getUploadType, MAX_UPLOAD_FILES, UPLOAD_DIRECTORY, UploadValidationError, uploadedFileHasValidSignature
+  avatarUpload, contentUpload, getUploadType, hasValidImageSignature, MAX_UPLOAD_FILES, UPLOAD_DIRECTORY,
+  UploadValidationError, uploadedFileHasValidSignature
 } from './uploads.js';
 
 export const router = Router();
@@ -32,11 +34,12 @@ interface ContentRow extends RowDataPacket {
   id: string;
   title: string;
   body: string;
-  image_url: string | null;
   published: number;
   created_at: Date;
   updated_at: Date;
   author_name: string;
+  author_id: string;
+  author_avatar_mime: string | null;
 }
 
 interface ContentAssetRow extends RowDataPacket {
@@ -77,6 +80,13 @@ const credentialsSchema = z.object({
   email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
   password: z.string().min(12).max(128)
 });
+const forgotPasswordSchema = z.object({
+  email: z.string().trim().email().max(254).transform((value) => value.toLowerCase())
+});
+const resetPasswordSchema = z.object({
+  token: z.string().min(20).max(200),
+  password: z.string().min(12).max(128)
+});
 const profileSchema = z.object({
   name: z.string().trim().min(2).max(100),
   email: z.string().trim().email().max(254).transform((value) => value.toLowerCase())
@@ -105,11 +115,6 @@ const registrationSchema = credentialsSchema.extend({
 const contentSchema = z.object({
   title: z.string().trim().min(1).max(180),
   body: z.string().trim().min(1).max(20000),
-  imageUrl: z.union([
-    z.string().trim().url().max(2048).refine((value) => /^https?:\/\//i.test(value)),
-    z.literal(''),
-    z.null()
-  ]).optional().transform((value) => value ?? null),
   published: z.preprocess(
     (value) => value === 'true' ? true : value === 'false' ? false : value,
     z.boolean()
@@ -138,6 +143,13 @@ const loginLimiter = rateLimit({
   legacyHeaders: false,
   message: { error: 'Too many sign-in attempts. Please try again in 15 minutes.' }
 });
+const passwordResetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many password reset attempts. Please try again in 15 minutes.' }
+});
 
 router.post('/auth/register', loginLimiter, asyncHandler(async (req, res) => {
   const input = parseBody(registrationSchema, req.body);
@@ -147,15 +159,15 @@ router.post('/auth/register', loginLimiter, asyncHandler(async (req, res) => {
     'INSERT INTO users (id, name, email, password_hash) VALUES (?, ?, ?, ?)',
     [id, input.name, input.email, passwordHash]
   );
-  const user: AuthUser = { id, name: input.name, email: input.email, role: 'user' };
+  const user: AuthUser = { id, name: input.name, email: input.email, role: 'user', avatarUrl: null };
   setSessionCookie(res, user);
   res.status(201).json({ user });
 }));
 
 router.post('/auth/login', loginLimiter, asyncHandler(async (req, res) => {
   const input = parseBody(credentialsSchema, req.body);
-  const [rows] = await db.execute<(UserRow & { password_hash: string; is_active: number })[]>(
-    'SELECT id, name, email, password_hash, role, is_active FROM users WHERE email = ? LIMIT 1',
+  const [rows] = await db.execute<(UserRow & { password_hash: string; is_active: number; avatar_mime: string | null })[]>(
+    'SELECT id, name, email, password_hash, role, is_active, avatar_mime FROM users WHERE email = ? LIMIT 1',
     [input.email]
   );
   const account = rows[0];
@@ -163,9 +175,79 @@ router.post('/auth/login', loginLimiter, asyncHandler(async (req, res) => {
     res.status(401).json({ error: 'Email or password is incorrect.' });
     return;
   }
-  const user: AuthUser = { id: account.id, name: account.name, email: account.email, role: account.role };
+  const user: AuthUser = {
+    id: account.id, name: account.name, email: account.email, role: account.role,
+    avatarUrl: account.avatar_mime ? `/api/account/avatar/${account.id}` : null
+  };
   setSessionCookie(res, user);
   res.json({ user });
+}));
+
+// Always responds the same way whether or not the email has an account, so the
+// endpoint cannot be used to discover who is registered.
+router.post('/auth/forgot-password', passwordResetLimiter, asyncHandler(async (req, res) => {
+  if (!isPasswordResetEmailConfigured() && config.NODE_ENV === 'production') {
+    res.status(503).json({ error: 'Password reset is not available right now. Please contact an administrator.' });
+    return;
+  }
+  const input = parseBody(forgotPasswordSchema, req.body);
+  const [rows] = await db.execute<Array<RowDataPacket & { id: string; name: string; email: string; is_active: number }>>(
+    'SELECT id, name, email, is_active FROM users WHERE email = ? LIMIT 1',
+    [input.email]
+  );
+  const account = rows[0];
+  if (account?.is_active) {
+    const token = randomBytes(32).toString('base64url');
+    const tokenHash = createHash('sha256').update(token).digest('hex');
+    await db.execute('DELETE FROM password_resets WHERE user_id = ? AND used_at IS NULL', [account.id]);
+    await db.execute(
+      'INSERT INTO password_resets (id, user_id, token_hash, expires_at) VALUES (?, ?, ?, DATE_ADD(NOW(), INTERVAL 30 MINUTE))',
+      [randomUUID(), account.id, tokenHash]
+    );
+    const resetUrl = `${config.CLIENT_ORIGIN}/reset-password?token=${encodeURIComponent(token)}`;
+    try {
+      await sendPasswordResetEmail(account.email, account.name, resetUrl);
+    } catch (error) {
+      await db.execute('DELETE FROM password_resets WHERE token_hash = ?', [tokenHash]);
+      console.error('Password reset email failed:', error);
+      res.status(503).json({ error: 'We could not send the reset email. Please try again later.' });
+      return;
+    }
+  }
+  res.json({ ok: true });
+}));
+
+router.post('/auth/reset-password', passwordResetLimiter, asyncHandler(async (req, res) => {
+  const input = parseBody(resetPasswordSchema, req.body);
+  const tokenHash = createHash('sha256').update(input.token).digest('hex');
+  const [rows] = await db.execute<Array<RowDataPacket & { id: string; user_id: string }>>(
+    `SELECT r.id, r.user_id
+       FROM password_resets r
+       JOIN users u ON u.id = r.user_id
+      WHERE r.token_hash = ? AND r.used_at IS NULL AND r.expires_at > NOW() AND u.is_active = TRUE
+      LIMIT 1`,
+    [tokenHash]
+  );
+  const reset = rows[0];
+  if (!reset) {
+    res.status(400).json({ error: 'This reset link is invalid or has expired. Please request a new one.' });
+    return;
+  }
+  const passwordHash = await bcrypt.hash(input.password, 12);
+  const connection = await db.getConnection();
+  try {
+    await connection.beginTransaction();
+    await connection.execute('UPDATE users SET password_hash = ? WHERE id = ?', [passwordHash, reset.user_id]);
+    await connection.execute('UPDATE password_resets SET used_at = NOW() WHERE id = ?', [reset.id]);
+    await connection.execute('DELETE FROM password_resets WHERE user_id = ? AND used_at IS NULL', [reset.user_id]);
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+  res.json({ ok: true });
 }));
 
 router.post('/auth/logout', (_req, res) => {
@@ -173,8 +255,18 @@ router.post('/auth/logout', (_req, res) => {
   res.status(204).end();
 });
 
+// The avatar itself lives in the database as a LONGBLOB; only a stable URL is
+// sent to clients so the image can be rendered in an <img> tag.
+async function withAvatar(user: AuthUser): Promise<AuthUser> {
+  const [rows] = await db.execute<Array<RowDataPacket & { avatar_mime: string | null }>>(
+    'SELECT avatar_mime FROM users WHERE id = ? LIMIT 1',
+    [user.id]
+  );
+  return { ...user, avatarUrl: rows[0]?.avatar_mime ? `/api/account/avatar/${user.id}` : null };
+}
+
 router.get('/auth/me', requireAuth, asyncHandler(async (req, res) => {
-  res.json({ user: currentUser(req as AuthRequest) });
+  res.json({ user: await withAvatar(currentUser(req as AuthRequest)) });
 }));
 
 router.patch('/account/profile', requireAuth, asyncHandler(async (req, res) => {
@@ -187,7 +279,48 @@ router.patch('/account/profile', requireAuth, asyncHandler(async (req, res) => {
   ]);
   const updatedUser: AuthUser = { ...user, name: input.name, email: input.email };
   setSessionCookie(res, updatedUser);
-  res.json({ user: updatedUser });
+  res.json({ user: await withAvatar(updatedUser) });
+}));
+
+router.post('/account/avatar', requireAuth, avatarUpload.single('avatar'), asyncHandler(async (req, res) => {
+  const file = req.file;
+  if (!file) {
+    throw new UploadValidationError('Choose an image to use as your profile photo.');
+  }
+  if (!hasValidImageSignature(file.mimetype, file.buffer)) {
+    throw new UploadValidationError('The image does not match its file type.');
+  }
+  const user = currentUser(req as AuthRequest);
+  await db.execute(
+    'UPDATE users SET avatar_image = ?, avatar_mime = ?, avatar_updated_at = NOW() WHERE id = ?',
+    [file.buffer, file.mimetype, user.id]
+  );
+  res.json({ user: await withAvatar(user) });
+}));
+
+router.delete('/account/avatar', requireAuth, asyncHandler(async (req, res) => {
+  const user = currentUser(req as AuthRequest);
+  await db.execute(
+    'UPDATE users SET avatar_image = NULL, avatar_mime = NULL, avatar_updated_at = NULL WHERE id = ?',
+    [user.id]
+  );
+  res.json({ user: await withAvatar(user) });
+}));
+
+router.get('/account/avatar/:userId', requireAuth, asyncHandler(async (req, res) => {
+  const [rows] = await db.execute<Array<RowDataPacket & { avatar_image: Buffer | null; avatar_mime: string | null }>>(
+    'SELECT avatar_image, avatar_mime FROM users WHERE id = ? LIMIT 1',
+    [String(req.params.userId)]
+  );
+  const avatar = rows[0];
+  if (!avatar?.avatar_image || !avatar.avatar_mime) {
+    res.status(404).json({ error: 'This member has no profile photo.' });
+    return;
+  }
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-site');
+  res.setHeader('Cache-Control', 'private, max-age=3600');
+  res.type(avatar.avatar_mime).send(avatar.avatar_image);
 }));
 
 router.post('/account/password', requireAuth, asyncHandler(async (req, res) => {
@@ -340,7 +473,8 @@ router.post('/notifications/read-all', requireAuth, asyncHandler(async (req, res
 
 router.get('/content', requireAuth, asyncHandler(async (req, res) => {
   const [rows] = await db.execute<ContentRow[]>(
-    `SELECT c.id, c.title, c.body, c.image_url, c.published, c.created_at, c.updated_at, u.name AS author_name
+    `SELECT c.id, c.title, c.body, c.published, c.created_at, c.updated_at, u.name AS author_name,
+            u.id AS author_id, u.avatar_mime AS author_avatar_mime
      FROM content c JOIN users u ON u.id = c.created_by
      WHERE c.published = TRUE ORDER BY c.created_at DESC LIMIT 100`
   );
@@ -357,7 +491,8 @@ router.get('/content', requireAuth, asyncHandler(async (req, res) => {
 
 router.get('/admin/content', requireAuth, requireRole('admin'), asyncHandler(async (req, res) => {
   const [rows] = await db.execute<ContentRow[]>(
-    `SELECT c.id, c.title, c.body, c.image_url, c.published, c.created_at, c.updated_at, u.name AS author_name
+    `SELECT c.id, c.title, c.body, c.published, c.created_at, c.updated_at, u.name AS author_name,
+            u.id AS author_id, u.avatar_mime AS author_avatar_mime
      FROM content c JOIN users u ON u.id = c.created_by
      ORDER BY c.created_at DESC LIMIT 200`
   );
@@ -391,8 +526,8 @@ router.post('/admin/content', requireAuth, requireRole('admin'), contentUpload.a
     await connection.beginTransaction();
     transactionStarted = true;
     await connection.execute(
-      'INSERT INTO content (id, title, body, image_url, published, created_by) VALUES (?, ?, ?, ?, ?, ?)',
-      [id, input.title, input.body, input.imageUrl ?? null, Number(input.published), currentUser(req as AuthRequest).id]
+      'INSERT INTO content (id, title, body, published, created_by) VALUES (?, ?, ?, ?, ?)',
+      [id, input.title, input.body, Number(input.published), currentUser(req as AuthRequest).id]
     );
     for (const file of files) {
       const type = getUploadType(file.originalname);
@@ -451,8 +586,8 @@ router.put('/admin/content/:id', requireAuth, requireRole('admin'), asyncHandler
     return;
   }
   const [result] = await db.execute<ResultSetHeader>(
-    `UPDATE content SET title = ?, body = ?, image_url = ?, published = ? WHERE id = ?`,
-    [input.title, input.body, input.imageUrl ?? null, Number(input.published), contentId]
+    `UPDATE content SET title = ?, body = ?, published = ? WHERE id = ?`,
+    [input.title, input.body, Number(input.published), contentId]
   );
   if (!result.affectedRows) {
     res.status(404).json({ error: 'Content item not found.' });
@@ -532,8 +667,8 @@ router.get('/media/:id', requireAuth, asyncHandler(async (req, res) => {
 }));
 
 router.get('/admin/users', requireAuth, requireRole('admin'), asyncHandler(async (_req, res) => {
-  const [rows] = await db.execute<(UserRow & { is_active: number })[]>(
-    'SELECT id, name, email, role, is_active, created_at FROM users ORDER BY created_at DESC LIMIT 500',
+  const [rows] = await db.execute<(UserRow & { is_active: number; avatar_mime: string | null })[]>(
+    'SELECT id, name, email, role, is_active, avatar_mime, created_at FROM users ORDER BY created_at DESC LIMIT 500',
     [] as any
   );
   res.json({
@@ -543,6 +678,7 @@ router.get('/admin/users', requireAuth, requireRole('admin'), asyncHandler(async
       email: user.email,
       role: user.role,
       active: Boolean(user.is_active),
+      avatarUrl: user.avatar_mime ? `/api/account/avatar/${user.id}` : null,
       createdAt: user.created_at
     }))
   });
@@ -708,13 +844,19 @@ router.get('/chat/conversations', requireAuth, asyncHandler(async (req, res) => 
     last_message: string | null;
     last_message_at: Date | null;
     last_sender_id: string | null;
+    unread_count: number;
   })[]>(
     `SELECT c.id, c.conversation_type, c.name AS conversation_name,
        other.id AS member_id, other.name AS member_name, other.role AS member_role,
        CASE WHEN c.conversation_type = 'group' THEN (
          SELECT COUNT(*) FROM private_conversation_members cm WHERE cm.conversation_id = c.id
        ) ELSE 2 END AS member_count,
-       latest.message AS last_message, latest.created_at AS last_message_at, latest.sender_id AS last_sender_id
+       latest.message AS last_message, latest.created_at AS last_message_at, latest.sender_id AS last_sender_id,
+       (SELECT COUNT(*) FROM private_messages pm
+        WHERE pm.conversation_id = c.id AND pm.sender_id <> ?
+        AND NOT EXISTS (
+          SELECT 1 FROM private_message_reads rr WHERE rr.message_id = pm.id AND rr.user_id = ?
+        )) AS unread_count
      FROM private_conversations c
      LEFT JOIN users other ON c.conversation_type = 'direct'
        AND other.id = IF(c.participant_a = ?, c.participant_b, c.participant_a)
@@ -729,7 +871,7 @@ router.get('/chat/conversations', requireAuth, asyncHandler(async (req, res) => 
        ))
      )
      ORDER BY COALESCE(latest.created_at, c.updated_at) DESC LIMIT 100`,
-    [user.id, user.id, user.id, user.id]
+    [user.id, user.id, user.id, user.id, user.id, user.id]
   );
   res.json({
     conversations: rows.map((row) => ({
@@ -742,7 +884,8 @@ router.get('/chat/conversations', requireAuth, asyncHandler(async (req, res) => 
         : null,
       lastMessage: row.last_message,
       lastMessageAt: row.last_message_at,
-      lastSenderId: row.last_sender_id
+      lastSenderId: row.last_sender_id,
+      unreadCount: Number(row.unread_count)
     }))
   });
 }));
@@ -880,6 +1023,19 @@ router.get('/chat/conversations/:id/messages', requireAuth, asyncHandler(async (
      WHERE m.conversation_id = ? ORDER BY m.id DESC LIMIT 100`,
     [id]
   );
+  const [readRows] = await db.execute<(RowDataPacket & { message_id: number; user_id: string })[]>(
+    `SELECT rr.message_id, rr.user_id FROM private_message_reads rr
+     JOIN private_messages m ON m.id = rr.message_id
+     WHERE m.conversation_id = ?`,
+    [id]
+  );
+  const readByMessage = new Map<number, string[]>();
+  for (const read of readRows) {
+    const messageId = Number(read.message_id);
+    const readers = readByMessage.get(messageId) ?? [];
+    readers.push(read.user_id);
+    readByMessage.set(messageId, readers);
+  }
   res.json({
     messages: rows.reverse().map((row) => ({
       id: Number(row.id),
@@ -895,9 +1051,88 @@ router.get('/chat/conversations/:id/messages', requireAuth, asyncHandler(async (
         : null,
       createdAt: row.created_at,
       userId: row.sender_id,
-      name: row.sender_name
+      name: row.sender_name,
+      readBy: readByMessage.get(Number(row.id)) ?? []
     }))
   });
+}));
+
+router.get('/chat/conversations/:id/members', requireAuth, asyncHandler(async (req, res) => {
+  const { id } = parseBody(conversationIdSchema, req.params);
+  const user = currentUser(req as AuthRequest);
+  const [conversations] = await db.execute<(RowDataPacket & {
+    conversation_type: 'direct' | 'group';
+    participant_a: string | null;
+    participant_b: string | null;
+  })[]>(
+    `SELECT c.conversation_type, c.participant_a, c.participant_b FROM private_conversations c
+     WHERE c.id = ? AND (
+       (c.conversation_type = 'direct' AND (c.participant_a = ? OR c.participant_b = ?))
+       OR (c.conversation_type = 'group' AND EXISTS (
+         SELECT 1 FROM private_conversation_members cm
+         WHERE cm.conversation_id = c.id AND cm.user_id = ?
+       ))
+     ) LIMIT 1`,
+    [id, user.id, user.id, user.id]
+  );
+  const conversation = conversations[0];
+  if (!conversation) {
+    res.status(404).json({ error: 'Conversation not found.' });
+    return;
+  }
+  const [members] = conversation.conversation_type === 'group'
+    ? await db.execute<(UserRow & { is_active: number })[]>(
+      `SELECT u.id, u.name, u.role FROM private_conversation_members cm
+       JOIN users u ON u.id = cm.user_id
+       WHERE cm.conversation_id = ? AND u.is_active = TRUE ORDER BY u.name ASC`,
+      [id]
+    )
+    : await db.execute<(UserRow & { is_active: number })[]>(
+      'SELECT id, name, role FROM users WHERE id IN (?, ?) AND is_active = TRUE ORDER BY name ASC',
+      [conversation.participant_a, conversation.participant_b]
+    );
+  res.json({
+    members: members.map((member) => ({ id: member.id, name: member.name, role: member.role }))
+  });
+}));
+
+router.post('/chat/conversations/:id/call-token', requireAuth, asyncHandler(async (req, res) => {
+  if (!isLiveKitConfigured()) {
+    res.status(503).json({ error: 'Audio and video calls are not available right now.' });
+    return;
+  }
+  const { id } = parseBody(conversationIdSchema, req.params);
+  const user = currentUser(req as AuthRequest);
+  const [access] = await db.execute<(RowDataPacket & { id: string })[]>(
+    `SELECT c.id FROM private_conversations c
+     WHERE c.id = ? AND (
+       (c.conversation_type = 'direct' AND (c.participant_a = ? OR c.participant_b = ?))
+       OR (c.conversation_type = 'group' AND EXISTS (
+         SELECT 1 FROM private_conversation_members cm
+         WHERE cm.conversation_id = c.id AND cm.user_id = ?
+       ))
+     ) LIMIT 1`,
+    [id, user.id, user.id, user.id]
+  );
+  if (!access.length) {
+    res.status(404).json({ error: 'Conversation not found.' });
+    return;
+  }
+  const roomName = `call-${id}`;
+  const token = new AccessToken(config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET, {
+    identity: user.id,
+    name: user.name,
+    metadata: JSON.stringify({ role: user.role, conversationId: id }),
+    ttl: '1h'
+  });
+  token.addGrant({
+    roomJoin: true,
+    room: roomName,
+    canPublish: true,
+    canSubscribe: true,
+    canPublishData: true
+  });
+  res.json({ token: await token.toJwt(), url: config.LIVEKIT_URL, roomName });
 }));
 
 router.get('/chat/messages', requireAuth, asyncHandler(async (_req, res) => {
@@ -1086,6 +1321,27 @@ router.post('/admin/stream/end', requireAuth, requireRole('admin'), asyncHandler
   res.json({ success: true });
 }));
 
+router.delete('/admin/stream/:id', requireAuth, requireRole('admin'), asyncHandler(async (req, res) => {
+  const id = String(req.params.id);
+  const [rows] = await db.execute<Array<RowDataPacket & { active: number; recording_path: string | null }>>(
+    'SELECT active, recording_path FROM livestreams WHERE id = ? LIMIT 1',
+    [id]
+  );
+  const stream = rows[0];
+  if (!stream) {
+    res.status(404).json({ error: 'This livestream could not be found.' });
+    return;
+  }
+  if (stream.active) {
+    res.status(409).json({ error: 'End the livestream before deleting it.' });
+    return;
+  }
+  // Likes and views are removed by the foreign key cascades.
+  await db.execute('DELETE FROM livestreams WHERE id = ? AND active = FALSE', [id]);
+  if (stream.recording_path) await deleteRecordingObject(stream.recording_path);
+  res.json({ success: true });
+}));
+
 router.get('/stream/replays', requireAuth, asyncHandler(async (_req, res) => {
   const [pending] = await db.execute<Array<RowDataPacket & {
     id: string; recording_egress_id: string; recording_path: string | null;
@@ -1188,7 +1444,7 @@ function currentUser(req: AuthRequest): AuthUser {
   return req.user;
 }
 
-function signRecordingUrl(objectKey: string, method: 'GET' | 'HEAD' = 'GET'): string {
+function signRecordingUrl(objectKey: string, method: 'GET' | 'HEAD' | 'DELETE' = 'GET'): string {
   const region = config.RECORDING_S3_REGION;
   const bucket = config.RECORDING_S3_BUCKET;
   const endpoint = new URL(config.RECORDING_S3_ENDPOINT || `https://s3.${region}.amazonaws.com`);
@@ -1217,6 +1473,18 @@ function signRecordingUrl(objectKey: string, method: 'GET' | 'HEAD' = 'GET'): st
   const signature = createHmac('sha256', signingKey).update(stringToSign).digest('hex');
   const finalQuery = `${canonicalQuery}&X-Amz-Signature=${signature}`;
   return `${endpoint.origin}${canonicalUri}?${finalQuery}`;
+}
+
+async function deleteRecordingObject(objectKey: string): Promise<void> {
+  if (!isStreamRecordingConfigured()) return;
+  try {
+    const response = await fetch(signRecordingUrl(objectKey, 'DELETE'), { method: 'DELETE' });
+    if (!response.ok && response.status !== 404) {
+      console.warn(`Unable to delete recording ${objectKey}: storage returned ${response.status}`);
+    }
+  } catch (error) {
+    console.warn('Unable to delete livestream recording:', error);
+  }
 }
 
 // Returns null when the storage provider cannot be reached or does not support
@@ -1342,11 +1610,11 @@ function toContent(row: ContentRow) {
     id: row.id,
     title: row.title,
     body: row.body,
-    imageUrl: row.image_url,
     published: Boolean(row.published),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    authorName: row.author_name
+    authorName: row.author_name,
+    authorAvatarUrl: row.author_avatar_mime ? `/api/account/avatar/${row.author_id}` : null
   };
 }
 
