@@ -8,6 +8,7 @@ import { AccessToken, EgressClient, EncodedFileOutput, EncodedFileType, RoomServ
 import { rateLimit } from 'express-rate-limit';
 import type { RowDataPacket, ResultSetHeader } from 'mysql2';
 import { config, isLiveKitConfigured, isStreamRecordingConfigured } from './config.js';
+import { notifyAccountDeleted, type DeletedAccountConversation } from './account-events.js';
 import { clearSessionCookie, requireAuth, requireRole, setSessionCookie } from './auth.js';
 import { db } from './db.js';
 import { createNotifications, type NotificationCategory } from './notifications.js';
@@ -130,6 +131,7 @@ const userUpdateSchema = z.object({
   role: z.enum(['admin', 'user']),
   active: z.boolean()
 });
+const accountDeleteSchema = z.object({ password: z.string().min(1).max(200) });
 const conversationSchema = z.object({ memberId: z.string().uuid() });
 const groupConversationSchema = z.object({
   name: z.string().trim().min(2).max(100),
@@ -337,6 +339,34 @@ router.post('/account/password', requireAuth, asyncHandler(async (req, res) => {
   }
   const passwordHash = await bcrypt.hash(input.newPassword, 12);
   await db.execute('UPDATE users SET password_hash = ? WHERE id = ?', [passwordHash, user.id]);
+  res.json({ success: true });
+}));
+
+router.delete('/account', requireAuth, asyncHandler(async (req, res) => {
+  const user = currentUser(req as AuthRequest);
+  const input = parseBody(accountDeleteSchema, req.body);
+  const [rows] = await db.execute<(RowDataPacket & { password_hash: string })[]>(
+    'SELECT password_hash FROM users WHERE id = ? LIMIT 1',
+    [user.id]
+  );
+  const account = rows[0];
+  if (!account || !(await bcrypt.compare(input.password, account.password_hash))) {
+    res.status(400).json({ error: 'Your password is incorrect.' });
+    return;
+  }
+  if (user.role === 'admin' && !await hasAnotherActiveAdmin(user.id)) {
+    res.status(409).json({ error: 'At least one active administrator must remain.' });
+    return;
+  }
+  let conversations: DeletedAccountConversation[] = [];
+  try {
+    conversations = await deleteUserAccount(user.id);
+  } catch (error) {
+    if (respondToAccountDeletionError(res, error)) return;
+    throw error;
+  }
+  notifyAccountDeleted({ userId: user.id, conversations });
+  clearSessionCookie(res);
   res.json({ success: true });
 }));
 
@@ -817,6 +847,36 @@ router.patch('/admin/users/:id', requireAuth, requireRole('admin'), asyncHandler
     input.active ? 1 : 0,
     target.id
   ]);
+  res.json({ success: true });
+}));
+
+router.delete('/admin/users/:id', requireAuth, requireRole('admin'), asyncHandler(async (req, res) => {
+  const actor = currentUser(req as AuthRequest);
+  if (req.params.id === actor.id) {
+    res.status(400).json({ error: 'Use Settings to delete your own account.' });
+    return;
+  }
+  const [rows] = await db.execute<(UserRow & { is_active: number })[]>(
+    'SELECT id, role, is_active FROM users WHERE id = ? LIMIT 1',
+    [req.params.id] as any
+  );
+  const target = rows[0];
+  if (!target) {
+    res.status(404).json({ error: 'User not found.' });
+    return;
+  }
+  if (target.role === 'admin' && target.is_active && !await hasAnotherActiveAdmin(target.id)) {
+    res.status(409).json({ error: 'At least one active administrator must remain.' });
+    return;
+  }
+  let conversations: DeletedAccountConversation[] = [];
+  try {
+    conversations = await deleteUserAccount(target.id);
+  } catch (error) {
+    if (respondToAccountDeletionError(res, error)) return;
+    throw error;
+  }
+  notifyAccountDeleted({ userId: target.id, conversations });
   res.json({ success: true });
 }));
 
@@ -1442,6 +1502,106 @@ router.post('/stream/view', requireAuth, asyncHandler(async (req, res) => {
 function currentUser(req: AuthRequest): AuthUser {
   if (!req.user) throw new Error('Authenticated user is missing from request.');
   return req.user;
+}
+
+class AccountDeletionError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+function respondToAccountDeletionError(res: Response, error: unknown): boolean {
+  if (!(error instanceof AccountDeletionError)) return false;
+  res.status(error.status).json({ error: error.message });
+  return true;
+}
+
+async function hasAnotherActiveAdmin(...excludedIds: string[]): Promise<boolean> {
+  if (!excludedIds.length) return true;
+  const [rows] = await db.execute<(RowDataPacket & { total: number })[]>(
+    `SELECT COUNT(*) AS total FROM users
+     WHERE role = 'admin' AND is_active = TRUE
+       AND id NOT IN (${excludedIds.map(() => '?').join(', ')})`,
+    excludedIds
+  );
+  return Number(rows[0]?.total ?? 0) > 0;
+}
+
+async function deleteUserAccount(userId: string): Promise<DeletedAccountConversation[]> {
+  const connection = await db.getConnection();
+  const filePaths: string[] = [];
+  const objectKeys: string[] = [];
+  const conversations: DeletedAccountConversation[] = [];
+  try {
+    await connection.beginTransaction();
+    const [activeStreams] = await connection.execute<(RowDataPacket & { total: number })[]>(
+      'SELECT COUNT(*) AS total FROM livestreams WHERE created_by = ? AND active = TRUE',
+      [userId]
+    );
+    if (Number(activeStreams[0]?.total ?? 0) > 0) {
+      throw new AccountDeletionError('End the active livestream before deleting this account.', 409);
+    }
+    const [conversationRows] = await connection.execute<(RowDataPacket & {
+      id: string;
+      conversation_type: 'direct' | 'group';
+      participant_a: string | null;
+      participant_b: string | null;
+    })[]>(
+      `SELECT c.id, c.conversation_type, c.participant_a, c.participant_b
+       FROM private_conversations c
+       WHERE c.participant_a = ? OR c.participant_b = ?
+          OR EXISTS (
+            SELECT 1 FROM private_conversation_members cm
+            WHERE cm.conversation_id = c.id AND cm.user_id = ?
+          )`,
+      [userId, userId, userId]
+    );
+    for (const row of conversationRows) {
+      let participantIds: string[];
+      if (row.conversation_type === 'direct') {
+        participantIds = [row.participant_a, row.participant_b].filter((id): id is string => Boolean(id));
+      } else {
+        const [members] = await connection.execute<(RowDataPacket & { user_id: string })[]>(
+          'SELECT user_id FROM private_conversation_members WHERE conversation_id = ?',
+          [row.id]
+        );
+        participantIds = members.map((member) => member.user_id);
+      }
+      conversations.push({
+        id: row.id,
+        type: row.conversation_type,
+        remainingParticipantIds: participantIds.filter((participantId) => participantId !== userId)
+      });
+    }
+    const [assets] = await connection.execute<(RowDataPacket & { stored_name: string })[]>(
+      `SELECT a.stored_name FROM content_assets a
+       JOIN content c ON c.id = a.content_id
+       WHERE c.created_by = ?`,
+      [userId]
+    );
+    filePaths.push(...assets.map((asset) => path.join(UPLOAD_DIRECTORY, asset.stored_name)));
+    const [streams] = await connection.execute<(RowDataPacket & { recording_path: string | null })[]>(
+      'SELECT recording_path FROM livestreams WHERE created_by = ? AND recording_path IS NOT NULL',
+      [userId]
+    );
+    objectKeys.push(...streams.flatMap((stream) => stream.recording_path ? [stream.recording_path] : []));
+    await connection.execute('DELETE FROM content WHERE created_by = ?', [userId]);
+    await connection.execute('DELETE FROM livestreams WHERE created_by = ?', [userId]);
+    await connection.execute('DELETE FROM chat_messages WHERE user_id = ?', [userId]);
+    const [result] = await connection.execute<ResultSetHeader>('DELETE FROM users WHERE id = ?', [userId]);
+    if (!result.affectedRows) throw new AccountDeletionError('User not found.', 404);
+    await connection.commit();
+  } catch (error) {
+    await connection.rollback();
+    throw error;
+  } finally {
+    connection.release();
+  }
+  await Promise.allSettled([
+    ...filePaths.map((filePath) => removeUploadedFiles([filePath])),
+    ...objectKeys.map((objectKey) => deleteRecordingObject(objectKey))
+  ]);
+  return conversations;
 }
 
 function signRecordingUrl(objectKey: string, method: 'GET' | 'HEAD' | 'DELETE' = 'GET'): string {

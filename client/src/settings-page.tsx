@@ -1,7 +1,7 @@
 import { LanguageSelect, useI18n } from './i18n';
 import { useEffect, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import {
   Bell, Building2, Camera, Check, Globe, KeyRound, Moon, Pencil, Shield, Sun, Trash2, UserRound, Users
 } from 'lucide-react';
@@ -16,9 +16,10 @@ function SettingsError({ children }: { children: string }) {
 }
 
 export function SettingsPage() {
-  const { user, preferences, siteSettings, refresh, savePreferences, saveSiteSettings } = useAuth();
+  const { user, preferences, siteSettings, refresh, logout, savePreferences, saveSiteSettings } = useAuth();
   const { t } = useI18n();
   const { showToast } = useToast();
+  const navigate = useNavigate();
   const [name, setName] = useState(user?.name ?? '');
   const [email, setEmail] = useState(user?.email ?? '');
   const [editingProfile, setEditingProfile] = useState(false);
@@ -46,6 +47,19 @@ export function SettingsPage() {
   const [siteBusy, setSiteBusy] = useState(false);
   const [siteError, setSiteError] = useState('');
   const [siteNotice, setSiteNotice] = useState('');
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+
+  useEffect(() => {
+    if (!deletingAccount) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape' && !deleteBusy) setDeletingAccount(false);
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [deletingAccount, deleteBusy]);
 
   useEffect(() => {
     setName(user?.name ?? '');
@@ -224,6 +238,28 @@ export function SettingsPage() {
     }
   }
 
+  async function deleteAccount(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!deletePassword || deleteBusy) return;
+    setDeleteBusy(true);
+    setDeleteError('');
+    try {
+      await api<void>('/account', {
+        method: 'DELETE',
+        body: JSON.stringify({ password: deletePassword })
+      });
+      await logout();
+      setDeletingAccount(false);
+      setDeletePassword('');
+      showToast(t('Your account has been deleted.'));
+      navigate('/login', { replace: true });
+    } catch (reason) {
+      setDeleteError(reason instanceof Error ? reason.message : 'Your account could not be deleted.');
+    } finally {
+      setDeleteBusy(false);
+    }
+  }
+
   function updatePreference<K extends keyof UserPreferences>(key: K, value: UserPreferences[K]) {
     setPreferenceDraft((previous) => ({ ...previous, [key]: value }));
     setPreferenceNotice('');
@@ -330,6 +366,32 @@ export function SettingsPage() {
           <Link className="secondary-button" to="/admin/users"><Users size={15} /> {t('Open Members')}</Link>
         </section>
       </>}
+
+      <section className="admin-panel settings-card danger-card">
+        <header className="settings-card-heading"><span><Trash2 size={18} /></span><div><h2>{t('Delete account')}</h2><p>{t('Permanently remove your account, messages, and community content.')}</p></div></header>
+        <div className="settings-summary">
+          <div className="settings-readonly"><span className="field-label">{t('This action cannot be undone')}</span><strong>{t('You will be signed out immediately.')}</strong></div>
+          <button type="button" className="danger-button" onClick={() => { setDeleteError(''); setDeletePassword(''); setDeletingAccount(true); }}><Trash2 size={15} /> {t('Delete account')}</button>
+        </div>
+      </section>
+
+      {deletingAccount && <div className="delete-confirm-backdrop" onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !deleteBusy) setDeletingAccount(false);
+      }}>
+        <section className="delete-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-account-title">
+          <span className="delete-confirm-icon"><Trash2 size={20} /></span>
+          <h2 id="delete-account-title">{t('Delete your account?')}</h2>
+          <p>{t('This permanently removes your account, messages, and content. Enter your password to continue.')}</p>
+          <form className="settings-form settings-edit-form" onSubmit={(event) => void deleteAccount(event)}>
+            <label><span className="field-label">{t('Your password')}</span><input className="settings-input" type="password" value={deletePassword} onChange={(event) => setDeletePassword(event.target.value)} autoComplete="current-password" required autoFocus /></label>
+            <SettingsError>{deleteError}</SettingsError>
+            <div className="delete-confirm-actions">
+              <button type="button" className="text-icon-button" onClick={() => setDeletingAccount(false)} disabled={deleteBusy}>{t('Cancel')}</button>
+              <button className="danger-button" type="submit" disabled={deleteBusy || !deletePassword}>{deleteBusy ? t('Deleting…') : t('Delete my account')}</button>
+            </div>
+          </form>
+        </section>
+      </div>}
     </div>
   );
 }

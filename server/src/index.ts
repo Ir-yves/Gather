@@ -10,6 +10,7 @@ import { Server as SocketServer } from 'socket.io';
 import { ZodError, z } from 'zod';
 import type { RowDataPacket, ResultSetHeader } from 'mysql2';
 import { config } from './config.js';
+import { setAccountDeletionHandler } from './account-events.js';
 import { authenticateSocket, getCookieToken, isAllowedClientOrigin, verifyOrigin } from './auth.js';
 import { db } from './db.js';
 import { createNotifications, setNotificationEmitter } from './notifications.js';
@@ -140,6 +141,31 @@ interface ActiveCallSignal {
   createdAt: number;
 }
 const activeCalls = new Map<string, ActiveCallSignal>();
+
+setAccountDeletionHandler(({ userId, conversations }) => {
+  for (const [callId, call] of activeCalls) {
+    if (!call.participantIds.includes(userId)) continue;
+    activeCalls.delete(callId);
+    for (const participantId of call.participantIds) {
+      if (participantId !== userId) {
+        io.to(participantId).emit('private:call-ended', { callId, conversationId: call.conversationId });
+      }
+    }
+  }
+  io.of('/').sockets.forEach((socket) => {
+    if (socket.data.user?.id === userId) socket.disconnect(true);
+  });
+  for (const conversation of conversations) {
+    for (const participantId of conversation.remainingParticipantIds) {
+      if (conversation.type === 'direct') {
+        io.to(participantId).emit('private:conversation-deleted', { conversationId: conversation.id });
+      } else {
+        io.to(participantId).emit('private:group-members-updated', { conversationId: conversation.id });
+        io.to(participantId).emit('private:conversation-updated', { conversationId: conversation.id });
+      }
+    }
+  }
+});
 
 interface ChatActionResult {
   success: boolean;

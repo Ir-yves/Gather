@@ -1643,6 +1643,10 @@ button:disabled { cursor: not-allowed; opacity: 0.58; }
 .settings-account-link strong { color: var(--text-strong); font-size: 0.86rem; }
 .settings-account-link p { margin: 4px 0 0; color: var(--text-soft); font-size: 0.75rem; }
 .settings-account-link .secondary-button { display: inline-flex; align-items: center; gap: 7px; }
+.settings-card.danger-card { border-color: rgba(201, 61, 88, 0.28); }
+.settings-card.danger-card .settings-card-heading > span { background: rgba(255, 229, 239, 0.8); color: var(--danger); }
+.settings-card.danger-card .settings-summary { align-items: center; }
+.delete-confirm-dialog form.settings-form { margin-top: 2px; }
 
 /* --- 17. Shared focus / input transitions ------------------------------- */
 .input-wrap, .settings-input, .form-panel input, .form-panel textarea,

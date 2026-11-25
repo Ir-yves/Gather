@@ -23,9 +23,23 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     credentials: 'include'
   });
   if (response.status === 204) return undefined as T;
-  const result = await response.json() as { error?: string } & T;
+  const responseText = await response.text();
+  let result: ({ error?: string } & T) | undefined;
+  if (responseText.trim()) {
+    try {
+      result = JSON.parse(responseText) as { error?: string } & T;
+    } catch {
+      const message = response.ok
+        ? 'The server returned an unreadable response. Check that the API URL points to the deployed backend.'
+        : `The server could not complete the request (HTTP ${response.status}).`;
+      throw new ApiError(message, response.status);
+    }
+  }
   if (!response.ok) {
-    throw new ApiError(result.error ?? 'The request could not be completed.', response.status);
+    throw new ApiError(result?.error ?? `The server could not complete the request (HTTP ${response.status}).`, response.status);
+  }
+  if (result === undefined) {
+    throw new ApiError('The server returned an empty response. Check that the API URL points to the deployed backend.', response.status);
   }
   return result;
 }

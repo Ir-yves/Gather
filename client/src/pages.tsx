@@ -666,14 +666,19 @@ export function AdminContentPage() {
 
 export function AdminUsersPage() {
   const { t } = useI18n();
+  const { user: viewer } = useAuth();
   const { showToast } = useToast();
-  const [users, setUsers] = useState<Array<{ id: string; name: string; email: string; role: 'admin' | 'user'; active: boolean }>>([]);
+  type ManagedUser = { id: string; name: string; email: string; role: 'admin' | 'user'; active: boolean };
+  const [users, setUsers] = useState<ManagedUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [deletingUser, setDeletingUser] = useState<ManagedUser | null>(null);
+  const [deletingUserId, setDeletingUserId] = useState('');
+  const [deleteError, setDeleteError] = useState('');
 
   useEffect(() => {
     let active = true;
-    api<{ users: typeof users }>('/admin/users').then((result) => {
+    api<{ users: ManagedUser[] }>('/admin/users').then((result) => {
       if (!active) return;
       setUsers(result.users);
     }).catch((reason: unknown) => {
@@ -682,21 +687,75 @@ export function AdminUsersPage() {
     return () => { active = false; };
   }, []);
 
+  useEffect(() => {
+    if (!deletingUser) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape' && !deletingUserId) setDeletingUser(null);
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [deletingUser, deletingUserId]);
+
   async function toggleUser(id: string, role: 'admin' | 'user', active: boolean) {
-    await api<void>(`/admin/users/${id}`, {
-      method: 'PATCH',
-      body: JSON.stringify({ role, active })
-    });
-    setUsers((previous) => previous.map((user) => user.id === id ? { ...user, role, active } : user));
-    showToast(t('Member access has been updated.'));
+    setError('');
+    try {
+      await api<void>(`/admin/users/${id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ role, active })
+      });
+      setUsers((previous) => previous.map((user) => user.id === id ? { ...user, role, active } : user));
+      showToast(t('Member access has been updated.'));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Unable to update member access.');
+    }
+  }
+
+  async function deleteUser() {
+    if (!deletingUser || deletingUserId) return;
+    setDeletingUserId(deletingUser.id);
+    setDeleteError('');
+    try {
+      await api<void>(`/admin/users/${encodeURIComponent(deletingUser.id)}`, { method: 'DELETE' });
+      setUsers((previous) => previous.filter((user) => user.id !== deletingUser.id));
+      setDeletingUser(null);
+      showToast(t('Member account deleted.'));
+    } catch (reason) {
+      setDeleteError(reason instanceof Error ? reason.message : 'This member could not be deleted.');
+    } finally {
+      setDeletingUserId('');
+    }
   }
 
   return (
     <div className="admin-page">
       <div className="page-header"><div><div className="eyebrow eyebrow-mint">{t('USERS')}</div><h1>{t('Manage members.')}</h1></div></div>
       {loading ? <div className="screen-loading small"><span className="spinner" /> {t('Loading members…')}</div> : <div className="admin-panel list-panel"><FieldError>{error}</FieldError><div className="admin-list">
-        {users.map((user) => <div className="member-row" key={user.id}><div><strong>{user.name}</strong><small>{user.email}</small></div><div className="member-actions"><span className={`member-pill ${user.active ? 'active' : 'inactive'}`}>{user.active ? t('Active') : t('Inactive')}</span><select value={user.role} onChange={(event) => void toggleUser(user.id, event.target.value as 'admin' | 'user', user.active)}><option value="user">{t('User')}</option><option value="admin">{t('Admin')}</option></select><button type="button" className="secondary-button" onClick={() => void toggleUser(user.id, user.role, !user.active)}>{user.active ? t('Disable') : t('Enable')}</button></div></div>)}
+        {users.map((user) => <div className="member-row" key={user.id}>
+          <div><strong>{user.name}</strong><small>{user.email}</small></div>
+          <div className="member-actions">
+            <span className={`member-pill ${user.active ? 'active' : 'inactive'}`}>{user.active ? t('Active') : t('Inactive')}</span>
+            {viewer?.id === user.id ? <span className="member-pill active">{t('Your account')}</span> : <>
+              <select value={user.role} onChange={(event) => void toggleUser(user.id, event.target.value as 'admin' | 'user', user.active)}><option value="user">{t('User')}</option><option value="admin">{t('Admin')}</option></select>
+              <button type="button" className="secondary-button" onClick={() => void toggleUser(user.id, user.role, !user.active)}>{user.active ? t('Disable') : t('Enable')}</button>
+              <button type="button" className="delete-group-button is-compact" title={t('Delete member')} aria-label={`${t('Delete member')}: ${user.name}`} onClick={() => { setDeleteError(''); setDeletingUser(user); }}><Trash2 size={14} /></button>
+            </>}
+          </div>
+        </div>)}
       </div></div>}
+      {deletingUser && <div className="delete-confirm-backdrop" onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !deletingUserId) setDeletingUser(null);
+      }}>
+        <section className="delete-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-member-title">
+          <span className="delete-confirm-icon"><Trash2 size={20} /></span>
+          <h2 id="delete-member-title">{t('Delete this member?')}</h2>
+          <p>{t("{name}'s account, messages, and content will be permanently removed. This cannot be undone.", { name: deletingUser.name })}</p>
+          <FieldError>{deleteError}</FieldError>
+          <div className="delete-confirm-actions">
+            <button type="button" className="text-icon-button" onClick={() => setDeletingUser(null)} disabled={Boolean(deletingUserId)}>{t('Cancel')}</button>
+            <button type="button" className="danger-button" onClick={() => void deleteUser()} disabled={Boolean(deletingUserId)}>{deletingUserId ? t('Deleting…') : t('Delete member')}</button>
+          </div>
+        </section>
+      </div>}
     </div>
   );
 }
