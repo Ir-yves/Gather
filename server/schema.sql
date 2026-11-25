@@ -168,6 +168,9 @@ CREATE TABLE IF NOT EXISTS livestreams (
   active BOOLEAN NOT NULL DEFAULT FALSE,
   started_at TIMESTAMP NULL,
   ended_at TIMESTAMP NULL,
+  recording_egress_id VARCHAR(64) NULL,
+  recording_path VARCHAR(512) NULL,
+  recording_status ENUM('recording', 'ready', 'failed', 'unavailable') NOT NULL DEFAULT 'unavailable',
   created_by CHAR(36) NOT NULL,
   CONSTRAINT fk_stream_author FOREIGN KEY (created_by) REFERENCES users(id)
 );

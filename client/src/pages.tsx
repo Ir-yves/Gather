@@ -4,16 +4,16 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { io } from 'socket.io-client';
 import type { Socket } from 'socket.io-client';
 import {
-  ArrowRight, ArrowUpRight, BookOpen, Camera, CameraOff, CircleHelp, Clock3, Download, Eye, EyeOff,
+  ArrowRight, ArrowUpRight, BookOpen, Camera, CameraOff, ChevronLeft, ChevronRight, CircleHelp, Clock3, Download, Eye, EyeOff,
   FileText, Forward, LoaderCircle, LockKeyhole, Mail, MessageCircle, MessageSquareReply, Mic, MicOff,
-  Radio, Send, Shield, Maximize2, Minimize2, Sparkles, ThumbsUp, Trash2, Users, Video, VideoOff, X
+  MoreHorizontal, Pause, PictureInPicture2, Play, Radio, RotateCcw, RotateCw, Send, Shield, Maximize2, Minimize2, Sparkles, StepBack, StepForward, ThumbsUp, Trash2, Users, Video, VideoOff, Volume2, VolumeX, X
 } from 'lucide-react';
 import {
   LiveKitRoom, ParticipantTile, RoomAudioRenderer, TrackLoop, useConnectionState, useLocalParticipant, useParticipants, useTracks
 } from '@livekit/components-react';
 import { ConnectionState, RoomEvent, Track } from 'livekit-client';
 import { api, mediaUrl, socketUrl } from './api';
-import type { ContentAsset, ContentItem, Stream } from './api';
+import type { ContentAsset, ContentItem, Stream, StreamReplay } from './api';
 import { useAuth, useFormSubmit } from './auth';
 import { Avatar } from './components';
 
@@ -78,8 +78,7 @@ export function LoginPage() {
           </div>
         </section>
       </div>
-      <footer className="auth-footer"><span>© 2026 Gather community
-        && yvex ltd</span><span><a href="#privacy">Privacy</a><a href="#terms">Terms</a><span>MADE WITH INTENTION ✳</span></span></footer>
+      <footer className="auth-footer"><span>© 2026 gather && yvex ltd.</span><span><a href="#privacy">Privacy</a><a href="#terms">Terms</a><span>MADE WITH INTENTION ✳</span></span></footer>
     </div>
   );
 }
@@ -129,7 +128,7 @@ export function RegisterPage() {
           </div>
         </section>
       </div>
-      <footer className="auth-footer"><span>© 2025 Gather community</span><span><a href="#privacy">Privacy</a><a href="#terms">Terms</a><span>MADE WITH INTENTION ✳</span></span></footer>
+      <footer className="auth-footer"><span>© 2026 gather && yvex ltd.</span><span><a href="#privacy">Privacy</a><a href="#terms">Terms</a><span>MADE WITH INTENTION ✳</span></span></footer>
     </div>
   );
 }
@@ -152,6 +151,8 @@ export function AdminHomePage() {
     live: boolean;
     streamTitle: string | null;
   } | null>(null);
+  const [lastReplay, setLastReplay] = useState<StreamReplay | null>(null);
+  const [watchingReplay, setWatchingReplay] = useState<StreamReplay | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   useEffect(() => {
@@ -160,8 +161,9 @@ export function AdminHomePage() {
       api<{ users: Array<{ id: string; name: string; email: string; role: 'admin' | 'user'; active: boolean }> }>('/admin/users'),
       api<{ content: ContentItem[] }>('/admin/content'),
       api<{ stream: Stream | null }>('/stream'),
-      api<{ views: number; likes: number }>('/admin/analytics/summary')
-    ]).then(([usersResult, contentResult, streamResult, engagement]) => {
+      api<{ views: number; likes: number }>('/admin/analytics/summary'),
+      api<{ replays: StreamReplay[] }>('/stream/replays')
+    ]).then(([usersResult, contentResult, streamResult, engagement, replayResult]) => {
       if (!active) return;
       setStats({
         users: usersResult.users.filter((user) => user.role === 'user' && user.active).length,
@@ -171,6 +173,7 @@ export function AdminHomePage() {
         live: Boolean(streamResult.stream),
         streamTitle: streamResult.stream?.title ?? null
       });
+      setLastReplay(replayResult.replays[0] ?? null);
       setError('');
     }).catch((reason: unknown) => {
       if (active) setError(reason instanceof Error ? reason.message : 'Unable to load dashboard metrics.');
@@ -182,6 +185,7 @@ export function AdminHomePage() {
   if (error) return <div className="empty-card"><h3>Dashboard unavailable</h3><p>{error}</p></div>;
 
   return (
+    <>
     <div className="admin-page">
       <section className="admin-welcome">
         <div className="admin-welcome-copy">
@@ -209,7 +213,17 @@ export function AdminHomePage() {
         <div className="admin-panel admin-highlight-panel"><div className="admin-panel-kicker">YOUR COMMUNITY</div><h3>A little progress, every day.</h3><p>Share something useful, celebrate a member, or make space for the next great conversation.</p><div className="admin-highlight-links"><Link to="/admin/users"><Users size={16} /> Manage members <ArrowUpRight size={14} /></Link><Link to="/admin/content"><BookOpen size={16} /> Organize content <ArrowUpRight size={14} /></Link></div></div>
         <div className="admin-panel admin-actions-panel"><div><div className="admin-panel-kicker">QUICK ACTIONS</div><h3>What would you like to do?</h3></div><div className="action-stack"><Link className="action-button" to="/admin/analytics"><Eye size={17} /><span><strong>Review views and likes</strong><small>See what members are engaging with</small></span><ArrowUpRight size={15} /></Link><Link className="action-button" to="/admin/live"><Radio size={17} /><span><strong>Manage livestream</strong><small>Start or manage a broadcast</small></span><ArrowUpRight size={15} /></Link><Link className="action-button" to="/admin/content"><BookOpen size={17} /><span><strong>Upload a document or video</strong><small>Share a resource with members</small></span><ArrowUpRight size={15} /></Link></div></div>
       </div>
+      {lastReplay && <section className="admin-panel last-replay-panel">
+        <div className="section-heading-row">
+          <div><div className="eyebrow eyebrow-mint">LAST LIVESTREAM</div><h2>{lastReplay.title}</h2><p>{lastReplay.startedAt ? formatDate(lastReplay.startedAt) : 'Date unavailable'} · {replayStatusLabel(lastReplay)}</p></div>
+          {lastReplay.playbackUrl
+            ? <button type="button" className="secondary-button" onClick={() => setWatchingReplay(lastReplay)}><Play size={15} /> Watch replay</button>
+            : <span className="member-pill">{replayStatusLabel(lastReplay)}</span>}
+        </div>
+      </section>}
     </div>
+    {watchingReplay && <ReplayViewer replay={watchingReplay} onClose={() => setWatchingReplay(null)} />}
+    </>
   );
 }
 
@@ -233,6 +247,7 @@ export function AdminAnalyticsPage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const [showAllItems, setShowAllItems] = useState(false);
 
   async function loadAnalytics() {
     setRefreshing(true);
@@ -255,6 +270,7 @@ export function AdminAnalyticsPage() {
   const totalViews = items.reduce((total, item) => total + item.views, 0);
   const totalLikes = items.reduce((total, item) => total + item.likes, 0);
   const filteredItems = filter === 'all' ? items : items.filter((item) => item.type === filter);
+  const visibleItems = showAllItems ? filteredItems : filteredItems.slice(0, 3);
   const filters: Array<{ id: 'all' | AnalyticsType; label: string }> = [
     { id: 'all', label: 'All activity' },
     { id: 'content', label: 'Updates' },
@@ -279,7 +295,7 @@ export function AdminAnalyticsPage() {
       </div>
       <div className="analytics-filters" role="group" aria-label="Filter analytics by item type">
         {filters.map((option) => (
-          <button key={option.id} type="button" className={filter === option.id ? 'analytics-filter active' : 'analytics-filter'} onClick={() => setFilter(option.id)}>
+          <button key={option.id} type="button" className={filter === option.id ? 'analytics-filter active' : 'analytics-filter'} onClick={() => { setFilter(option.id); setShowAllItems(false); }}>
             {option.label}
           </button>
         ))}
@@ -288,15 +304,20 @@ export function AdminAnalyticsPage() {
       {loading
         ? <div className="screen-loading"><span className="spinner" /> Loading engagement…</div>
         : filteredItems.length
-          ? <div className="analytics-list">
-            {filteredItems.map((item) => <AnalyticsItemCard key={`${item.type}-${item.id}`} item={item} />)}
-          </div>
+          ? <>
+            <div className="analytics-list">
+              {visibleItems.map((item) => <AnalyticsItemCard key={`${item.type}-${item.id}`} item={item} />)}
+            </div>
+            {filteredItems.length > 3 && <ShowMoreButton expanded={showAllItems} onClick={() => setShowAllItems((value) => !value)} label="activity items" />}
+          </>
           : <div className="empty-card"><h3>No activity to show yet.</h3><p>Views and likes will appear here as members explore the community.</p></div>}
     </div>
   );
 }
 
 function AnalyticsItemCard({ item }: { item: AnalyticsItem }) {
+  const [showAllLikers, setShowAllLikers] = useState(false);
+  const visibleLikers = showAllLikers ? item.likers : item.likers.slice(0, 3);
   const typeLabel = {
     content: 'Community update',
     document: 'Document',
@@ -323,11 +344,18 @@ function AnalyticsItemCard({ item }: { item: AnalyticsItem }) {
       <div className="analytics-likers">
         <h3>Members who liked this</h3>
         {item.likers.length
-          ? <ul>{item.likers.map((member) => <li key={member.id}><Avatar name={member.name} small /><span><strong>{member.name}</strong><small>{member.email}</small></span></li>)}</ul>
+          ? <><ul>{visibleLikers.map((member) => <li key={member.id}><Avatar name={member.name} small /><span><strong>{member.name}</strong><small>{member.email}</small></span></li>)}</ul>
+            {item.likers.length > 3 && <ShowMoreButton expanded={showAllLikers} onClick={() => setShowAllLikers((value) => !value)} label="members" compact />}</>
           : <p>No likes yet.</p>}
       </div>
     </article>
   );
+}
+
+function ShowMoreButton({ expanded, onClick, label, compact = false }: { expanded: boolean; onClick: () => void; label: string; compact?: boolean }) {
+  return <button type="button" className={`show-more-button ${compact ? 'compact' : ''}`} aria-expanded={expanded} onClick={onClick}>
+    <MoreHorizontal size={17} />{expanded ? 'Show less' : `See more ${label}`}
+  </button>;
 }
 
 function MetricCard({ label, value, trend, tone, icon }: { label: string; value: string; trend: string; tone: 'mint' | 'blue' | 'rose' | 'amber'; icon: ReactNode }) {
@@ -350,12 +378,20 @@ export function AdminContentPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [showAllContent, setShowAllContent] = useState(false);
+  const [lastReplay, setLastReplay] = useState<StreamReplay | null>(null);
+  const [watchingReplay, setWatchingReplay] = useState<StreamReplay | null>(null);
 
   useEffect(() => {
     let active = true;
-    api<{ content: ContentItem[] }>('/admin/content').then((result) => {
+    Promise.all([
+      api<{ content: ContentItem[] }>('/admin/content'),
+      api<{ replays: StreamReplay[] }>('/stream/replays')
+    ]).then(([contentResult, replayResult]) => {
       if (!active) return;
-      setItems(result.content); setError('');
+      setItems(contentResult.content);
+      setLastReplay(replayResult.replays[0] ?? null);
+      setError('');
     }).catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : 'Unable to load content.'); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, []);
@@ -414,6 +450,7 @@ export function AdminContentPage() {
   }
 
   return (
+    <>
     <div className="admin-page">
       <div className="page-header"><div><div className="eyebrow eyebrow-mint">CONTENT</div><h1>Manage community updates.</h1></div></div>
       <div className="admin-split-grid">
@@ -433,12 +470,20 @@ export function AdminContentPage() {
         </form>
         <div className="admin-panel list-panel">
           <h3>Recent updates</h3>
-          {loading ? <div className="screen-loading small"><span className="spinner" /> Loading…</div> : items.length === 0 ? <div className="empty-card small"><p>No updates yet.</p></div> : <div className="admin-list">
-            {items.map((item) => <div className="list-row" key={item.id}><div><strong>{item.title}</strong><small>{item.published ? 'Published' : 'Draft'} · {formatDate(item.createdAt)} · {item.assets.length} attachments</small></div><button type="button" className="danger-button" onClick={() => void remove(item.id)}>Delete</button></div>)}
-          </div>}
+          {loading ? <div className="screen-loading small"><span className="spinner" /> Loading…</div> : items.length === 0 && !lastReplay ? <div className="empty-card small"><p>No updates yet.</p></div> : <>
+            <div className="admin-list">
+              {lastReplay && <div className="list-row replay-update-row"><div><strong>Livestream replay · {lastReplay.title}</strong><small>{lastReplay.startedAt ? formatDate(lastReplay.startedAt) : 'Date unavailable'} · {replayStatusLabel(lastReplay)}</small></div>{lastReplay.playbackUrl
+                ? <button type="button" className="text-icon-button" onClick={() => setWatchingReplay(lastReplay)}><Play size={14} /> Watch</button>
+                : <span className="member-pill">{replayStatusLabel(lastReplay)}</span>}</div>}
+              {(showAllContent ? items : items.slice(0, 3)).map((item) => <div className="list-row" key={item.id}><div><strong>{item.title}</strong><small>{item.published ? 'Published' : 'Draft'} · {formatDate(item.createdAt)} · {item.assets.length} attachments</small></div><button type="button" className="danger-button" onClick={() => void remove(item.id)}>Delete</button></div>)}
+            </div>
+            {items.length > 3 && <ShowMoreButton expanded={showAllContent} onClick={() => setShowAllContent((value) => !value)} label="updates" />}
+          </>}
         </div>
       </div>
     </div>
+    {watchingReplay && <ReplayViewer replay={watchingReplay} onClose={() => setWatchingReplay(null)} />}
+    </>
   );
 }
 
@@ -480,17 +525,29 @@ export function AdminLivePage() {
   const [title, setTitle] = useState('');
   const [stream, setStream] = useState<Stream | null>(null);
   const [livekitUrl, setLivekitUrl] = useState('');
+  const [recordingEnabled, setRecordingEnabled] = useState(false);
   const [publisherToken, setPublisherToken] = useState('');
   const [broadcastConnected, setBroadcastConnected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [previousStreams, setPreviousStreams] = useState<Array<{ id: string; title: string; createdAt: string | null; active?: boolean; views: number; likes: number }>>([]);
+  const [showAllPreviousStreams, setShowAllPreviousStreams] = useState(false);
+  const [replays, setReplays] = useState<StreamReplay[]>([]);
+  const [watchingReplay, setWatchingReplay] = useState<StreamReplay | null>(null);
   useEffect(() => {
     let active = true;
-    void api<{ stream: Stream | null; livekitUrl: string }>('/stream').then(async (result) => {
+    void api<{ items: Array<{ id: string; type: string; title: string; createdAt: string | null; active?: boolean; views: number; likes: number }> }>('/admin/analytics')
+      .then((result) => { if (active) setPreviousStreams(result.items.filter((item) => item.type === 'stream')); })
+      .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : 'Unable to load previous livestreams.'); });
+    void api<{ replays: StreamReplay[] }>('/stream/replays')
+      .then((result) => { if (active) setReplays(result.replays); })
+      .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : 'Unable to load livestream replays.'); });
+    void api<{ stream: Stream | null; livekitUrl: string; recordingEnabled: boolean }>('/stream').then(async (result) => {
       if (!active) return;
       setStream(result.stream);
       setLivekitUrl(result.livekitUrl);
+      setRecordingEnabled(result.recordingEnabled);
       if (result.stream) {
         try {
           const token = await api<{ token: string }>('/stream/token', { method: 'POST' });
@@ -511,10 +568,11 @@ export function AdminLivePage() {
     setError('');
     try {
       await api<{ success: true }>('/admin/stream/start', { method: 'POST', body: JSON.stringify({ title }) });
-      const current = await api<{ stream: Stream | null; livekitUrl: string }>('/stream');
+      const current = await api<{ stream: Stream | null; livekitUrl: string; recordingEnabled: boolean }>('/stream');
       if (!current.stream) throw new Error('The livestream room was not created. Please try again.');
       setStream(current.stream);
       setLivekitUrl(current.livekitUrl);
+      setRecordingEnabled(current.recordingEnabled);
       setTitle('');
       const token = await api<{ token: string }>('/stream/token', { method: 'POST' });
       setPublisherToken(token.token);
@@ -533,6 +591,7 @@ export function AdminLivePage() {
       setPublisherToken('');
       setBroadcastConnected(false);
       setStream(null);
+      void api<{ replays: StreamReplay[] }>('/stream/replays').then((result) => setReplays(result.replays)).catch(() => {});
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Unable to end the livestream.');
     } finally {
@@ -544,11 +603,12 @@ export function AdminLivePage() {
     setBusy(true);
     setError('');
     try {
-      const current = await api<{ stream: Stream | null; livekitUrl: string }>('/stream');
+      const current = await api<{ stream: Stream | null; livekitUrl: string; recordingEnabled: boolean }>('/stream');
       if (!current.stream) throw new Error('There is no active livestream to connect to.');
       const result = await api<{ token: string }>('/stream/token', { method: 'POST' });
       setStream(current.stream);
       setLivekitUrl(current.livekitUrl);
+      setRecordingEnabled(current.recordingEnabled);
       setPublisherToken(result.token);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Unable to connect to the livestream.');
@@ -557,7 +617,12 @@ export function AdminLivePage() {
     }
   }
 
+  const replayById = new Map(replays.map((replay) => [replay.id, replay]));
+  const archive = previousStreams.map((item) => ({ ...item, replay: replayById.get(item.id) ?? null }));
+  const lastStream = archive.find((item) => !item.active) ?? archive[0] ?? null;
+
   return (
+    <>
     <div className="admin-page">
       <div className="page-header"><div><div className="eyebrow eyebrow-mint">LIVE</div><h1>Manage the livestream.</h1></div></div>
       <div className="admin-split-grid">
@@ -565,6 +630,7 @@ export function AdminLivePage() {
           <h3>{stream ? 'You’re hosting live' : 'Start a livestream'}</h3>
           {!stream && <label className="field-label">Session title<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Community AMA / Q&A / Training" required maxLength={180} /> </label>}
           {stream && <p className="broadcast-help">Keep this page open while you’re broadcasting. Members can join from their community page.</p>}
+          {!recordingEnabled && <p className="recording-notice" role="status">Replay recording is off. Configure recording storage to save this livestream for later playback.</p>}
           <FieldError>{error}</FieldError>
           {!stream
             ? <button className="button-primary" type="submit" disabled={busy || loading}>{busy ? 'Starting…' : 'Start livestream'}</button>
@@ -601,7 +667,33 @@ export function AdminLivePage() {
           </LiveKitRoom>
           : <div className="empty-card small"><p>Broadcaster is not connected. You can retry the connection.</p><button className="button-primary" type="button" onClick={() => void reconnectPublisher()} disabled={busy}>{busy ? 'Connecting…' : 'Connect broadcaster'}</button></div>}
       </section>}
+      <section className="admin-panel last-stream-panel">
+        <div className="section-heading-row">
+          <div><div className="eyebrow eyebrow-mint">MOST RECENT SESSION</div><h2>Last livestream</h2><p>Details and replay for the latest community broadcast.</p></div>
+          {!loading && lastStream?.replay?.playbackUrl
+            ? <button type="button" className="button-primary" onClick={() => setWatchingReplay(lastStream.replay)}><Play size={15} /> Watch replay</button>
+            : !loading && lastStream ? <span className="member-pill">{replayStatusLabel(lastStream.replay)}</span> : null}
+        </div>
+        {loading ? <div className="screen-loading small"><span className="spinner" /> Loading last session…</div> : lastStream ? <div className="last-stream-info">
+          <div><span className="field-label">Session</span><strong>{lastStream.title}</strong></div>
+          <div><span className="field-label">When</span><strong>{lastStream.createdAt ? formatDate(lastStream.createdAt) : 'Date unavailable'}</strong></div>
+          <div><span className="field-label">Engagement</span><strong>{lastStream.views} {lastStream.views === 1 ? 'view' : 'views'} · {lastStream.likes} {lastStream.likes === 1 ? 'like' : 'likes'}</strong></div>
+          <div><span className="field-label">Replay</span><strong>{replayStatusLabel(lastStream.replay)}</strong></div>
+        </div> : <div className="empty-card small"><p>No livestreams yet. Completed sessions will appear here.</p></div>}
+      </section>
+      <section className="admin-panel list-panel livestream-history">
+        <div className="section-heading-row"><div><div className="eyebrow eyebrow-mint">LIVESTREAM ARCHIVE</div><h2>Previous livestreams</h2><p>Review past sessions and their member engagement.</p></div></div>
+        {loading ? <div className="screen-loading small"><span className="spinner" /> Loading history…</div> : archive.length ? <div className="admin-list">
+          {(showAllPreviousStreams ? archive : archive.slice(0, 3)).map((item) => <div className="member-row" key={item.id}>
+            <div><strong>{item.title}</strong><small>{item.createdAt ? `${formatDate(item.createdAt)} · ${item.active ? 'In progress' : 'Ended'}` : item.active ? 'In progress' : 'Date unavailable'}</small></div>
+            <div className="member-actions"><span className="member-pill">{item.views} {item.views === 1 ? 'view' : 'views'}</span><span className="member-pill">{item.likes} {item.likes === 1 ? 'like' : 'likes'}</span>{item.replay?.playbackUrl && <button type="button" className="text-icon-button" onClick={() => setWatchingReplay(item.replay)}><Play size={14} /> Watch</button>}</div>
+          </div>)}
+        </div> : <div className="empty-card small"><p>No previous livestreams yet. Completed sessions will appear here.</p></div>}
+        {!loading && archive.length > 3 && <ShowMoreButton expanded={showAllPreviousStreams} onClick={() => setShowAllPreviousStreams((value) => !value)} label="livestreams" />}
+      </section>
     </div>
+    {watchingReplay && <ReplayViewer replay={watchingReplay} onClose={() => setWatchingReplay(null)} />}
+    </>
   );
 }
 
@@ -609,6 +701,8 @@ export function MemberPage() {
   const { user, siteSettings } = useAuth();
   const [content, setContent] = useState<ContentItem[]>([]);
   const [stream, setStream] = useState<Stream | null>(null);
+  const [replays, setReplays] = useState<StreamReplay[]>([]);
+  const [showAllUpdates, setShowAllUpdates] = useState(false);
   const [livekitUrl, setLivekitUrl] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -618,12 +712,14 @@ export function MemberPage() {
     setLoading(true);
     Promise.all([
       api<{ content: ContentItem[] }>('/content'),
-      api<{ stream: Stream | null; livekitUrl: string }>('/stream')
-    ]).then(([contentResult, streamResult]) => {
+      api<{ stream: Stream | null; livekitUrl: string }>('/stream'),
+      api<{ replays: StreamReplay[] }>('/stream/replays')
+    ]).then(([contentResult, streamResult, replayResult]) => {
       if (!active) return;
       setContent(contentResult.content);
       setStream(streamResult.stream);
       setLivekitUrl(streamResult.livekitUrl);
+      setReplays(replayResult.replays);
       setError('');
     }).catch((reason: unknown) => {
       if (active) setError(reason instanceof Error ? reason.message : 'Unable to load your space.');
@@ -638,6 +734,11 @@ export function MemberPage() {
         if (active) setStream(result.stream);
       }).catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : 'Unable to check livestream status.');
+      });
+      void api<{ replays: StreamReplay[] }>('/stream/replays').then((result) => {
+        if (active) setReplays(result.replays);
+      }).catch((reason: unknown) => {
+        if (active) setError(reason instanceof Error ? reason.message : 'Unable to refresh livestream replays.');
       });
     };
     const intervalId = window.setInterval(refreshStream, 10000);
@@ -683,7 +784,7 @@ export function MemberPage() {
           {loading && <div className="empty-card"><span className="spinner" /><p>Finding the latest updates…</p></div>}
           {!loading && content.length === 0 && <div className="empty-card"><span className="empty-illustration"><Sparkles size={23} /></span><h3>A little quiet for now.</h3><p>Your community’s next update will show up right here.</p></div>}
           <div className="update-list">
-            {content.map((item, index) => (
+            {(showAllUpdates ? content : content.slice(0, 3)).map((item, index) => (
               <article className={`update-card ${index === 0 && item.imageUrl ? 'update-card-featured' : ''}`} key={item.id}>
                 {item.imageUrl && <div className="update-image"><img src={item.imageUrl} alt="" loading="lazy" /></div>}
                 <div className="update-content"><div className="update-meta"><span className="update-tag"><span /> COMMUNITY NOTE</span><span className="update-date"><Clock3 size={13} /> {formatDate(item.createdAt)}</span></div><h3>{item.title}</h3><p>{item.body}</p>
@@ -692,9 +793,11 @@ export function MemberPage() {
               </article>
             ))}
           </div>
+          {content.length > 3 && <ShowMoreButton expanded={showAllUpdates} onClick={() => setShowAllUpdates((value) => !value)} label="updates" />}
         </section>
         <aside className="member-rail">
           <StreamCard stream={stream} livekitUrl={livekitUrl} />
+          <ReplayPlayer replays={replays} />
           <ChatCard />
           <div className="member-rail-note"><CircleHelp size={15} /><span>Good spaces are built together.</span><a href="#about" aria-label="About this community"><ArrowUpRight size={14} /></a></div>
         </aside>
@@ -705,21 +808,28 @@ export function MemberPage() {
 
 function ContentAttachment({ asset }: { asset: ContentAsset }) {
   const [isOpen, setIsOpen] = useState(false);
+  const [isPlaying, setIsPlaying] = useState(false);
   const downloadUrl = mediaUrl(`${asset.url}?download=1`);
+  const isVideo = asset.category === 'video';
 
   return (
     <>
       <div className="asset-download">
-        {asset.category === 'video' ? <Video size={18} /> : <FileText size={18} />}
+        {isVideo ? <Video size={18} /> : <FileText size={18} />}
         <span><strong>{asset.name}</strong><small>{formatFileSize(asset.sizeBytes)}</small></span>
-        <button type="button" className="text-icon-button" onClick={() => setIsOpen(true)}>
-          {asset.category === 'video' ? 'Watch' : 'Open'}
+        <button
+          type="button"
+          className="text-icon-button"
+          aria-expanded={isVideo ? isPlaying : undefined}
+          onClick={() => (isVideo ? setIsPlaying((value) => !value) : setIsOpen(true))}
+        >
+          {isVideo ? (isPlaying ? 'Hide' : 'Watch') : 'Open'}
         </button>
         <LikeButton type="asset" targetId={asset.id} likesCount={asset.likesCount} liked={asset.liked} compact />
         <a className="asset-download-link" href={downloadUrl} download={asset.name} aria-label={`Download ${asset.name}`}><Download size={17} /></a>
       </div>
-      {asset.category === 'video' && (
-        <video controls preload="metadata" src={mediaUrl(asset.url)} aria-label={asset.name}>
+      {isVideo && isPlaying && (
+        <video className="update-video" controls autoPlay playsInline src={mediaUrl(asset.url)} aria-label={asset.name}>
           Your browser does not support video playback.
         </video>
       )}
@@ -933,7 +1043,7 @@ function StreamCard({ stream, livekitUrl }: { stream: Stream | null; livekitUrl:
         </div>
         <h3>{stream.title}</h3>
         <LikeButton type="stream" targetId={stream.id} likesCount={stream.likesCount} liked={stream.liked} />
-        {token && <LiveKitRoom token={token} serverUrl={livekitUrl} connect className="livekit-shell" onConnected={() => { void recordStreamView(); }} onError={(reason) => setError(`Unable to connect to the livestream: ${reason.message}`)}><div className="livekit-attendee-bar"><LiveAttendeeCount /></div><div className="livekit-stage"><StreamTiles /><RoomAudioRenderer /></div></LiveKitRoom>}
+        {token && <LiveKitRoom token={token} serverUrl={livekitUrl} connect className="livekit-shell" onConnected={() => { void recordStreamView(); }} onError={(reason) => setError(`Unable to connect to the livestream: ${reason.message}`)}><div className="livekit-attendee-bar"><LiveAttendeeCount /></div><MemberStreamControls expanded={expanded} onToggleExpanded={() => setExpanded((value) => !value)} /></LiveKitRoom>}
         <button className="stream-leave-button" onClick={() => { setActive(false); setExpanded(false); setToken(''); }}>Leave livestream <ArrowUpRight size={14} /></button>
         <FieldError>{error}</FieldError>
       </section>
@@ -949,10 +1059,234 @@ function StreamCard({ stream, livekitUrl }: { stream: Stream | null; livekitUrl:
   );
 }
 
+const FRAME_SECONDS = 1 / 30;
+
+function formatTimecode(seconds: number): string {
+  if (!Number.isFinite(seconds)) return '00:00.000';
+  const safe = Math.max(0, seconds);
+  const minutes = Math.floor(safe / 60);
+  const secs = Math.floor(safe % 60);
+  const ms = Math.floor((safe % 1) * 1000);
+  return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
+
+function PreciseReplayVideo({ replay, className, autoPlay = false }: {
+  replay: StreamReplay;
+  className?: string;
+  autoPlay?: boolean;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [playing, setPlaying] = useState(false);
+
+  function sync() {
+    const video = videoRef.current;
+    if (!video) return;
+    setCurrent(video.currentTime);
+    setDuration(Number.isFinite(video.duration) ? video.duration : 0);
+    setPlaying(!video.paused && !video.ended);
+  }
+
+  function seekBy(delta: number) {
+    const video = videoRef.current;
+    if (!video) return;
+    const max = Number.isFinite(video.duration) ? video.duration : 0;
+    video.currentTime = Math.min(max || Number.MAX_SAFE_INTEGER, Math.max(0, video.currentTime + delta));
+    setCurrent(video.currentTime);
+  }
+
+  async function togglePlayback() {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) await video.play();
+    else video.pause();
+    sync();
+  }
+
+  function onKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      seekBy((event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? FRAME_SECONDS : 5));
+    } else if (event.key === ' ' || event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      void togglePlayback();
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      seekBy(-Number.MAX_SAFE_INTEGER);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      seekBy(Number.MAX_SAFE_INTEGER);
+    }
+  }
+
+  return (
+    <div className="precise-replay" tabIndex={0} onKeyDown={onKeyDown} aria-label="Replay player with precise seeking">
+      <video
+        ref={videoRef}
+        key={replay.id}
+        className={className}
+        controls
+        autoPlay={autoPlay}
+        playsInline
+        preload="metadata"
+        src={replay.playbackUrl ?? undefined}
+        onLoadedMetadata={sync}
+        onDurationChange={sync}
+        onTimeUpdate={sync}
+        onSeeked={sync}
+        onPlay={sync}
+        onPause={sync}
+        onEnded={sync}
+        aria-label={`Replay: ${replay.title}`}
+      >
+        Your browser does not support video playback.
+      </video>
+      <div className="precise-replay-bar" role="group" aria-label="Precise replay controls">
+        <button type="button" className="precise-replay-button" onClick={() => seekBy(-10)} aria-label="Back 10 seconds" title="Back 10 seconds"><RotateCcw size={15} /><span>10s</span></button>
+        <button type="button" className="precise-replay-button" onClick={() => seekBy(-FRAME_SECONDS)} aria-label="Back one frame" title="Back one frame"><StepBack size={15} /></button>
+        <button type="button" className="precise-replay-button is-play" onClick={() => void togglePlayback()} aria-label={playing ? 'Pause replay' : 'Play replay'} title={playing ? 'Pause' : 'Play'}>{playing ? <Pause size={15} /> : <Play size={15} />}</button>
+        <button type="button" className="precise-replay-button" onClick={() => seekBy(FRAME_SECONDS)} aria-label="Forward one frame" title="Forward one frame"><StepForward size={15} /></button>
+        <button type="button" className="precise-replay-button" onClick={() => seekBy(10)} aria-label="Forward 10 seconds" title="Forward 10 seconds"><RotateCw size={15} /><span>10s</span></button>
+        <input
+          className="precise-scrub"
+          type="range"
+          min={0}
+          max={duration || 1}
+          step={0.01}
+          value={Math.min(current, duration || 1)}
+          onChange={(event) => {
+            const video = videoRef.current;
+            if (!video) return;
+            video.currentTime = Number(event.target.value);
+            setCurrent(video.currentTime);
+          }}
+          aria-label="Seek replay precisely"
+        />
+        <span className="precise-timecode"><strong>{formatTimecode(current)}</strong> / {formatTimecode(duration)}</span>
+      </div>
+      <small className="precise-hint">Arrow keys ±5s · Shift + arrows 1 frame · Space play/pause · Scrubber steps 10ms</small>
+    </div>
+  );
+}
+
+function ReplayViewer({ replay, onClose }: { replay: StreamReplay; onClose: () => void }) {
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose();
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div className="attachment-viewer-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section className="attachment-viewer replay-viewer" role="dialog" aria-modal="true" aria-labelledby="replay-viewer-title">
+        <header className="attachment-viewer-header">
+          <div><span className="eyebrow eyebrow-mint">LIVESTREAM REPLAY</span><h2 id="replay-viewer-title">{replay.title}</h2></div>
+          <div className="attachment-viewer-actions">
+            <button type="button" className="text-icon-button" aria-label="Close replay" onClick={onClose}><X size={18} /></button>
+          </div>
+        </header>
+        <div className="attachment-viewer-body">
+          <PreciseReplayVideo replay={replay} className="replay-viewer-video" autoPlay />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function replayStatusLabel(replay: StreamReplay | null): string {
+  if (!replay) return 'Not available';
+  if (replay.status === 'ready' && replay.playbackUrl) return 'Ready to watch';
+  if (replay.status === 'recording') return 'Preparing…';
+  if (replay.status === 'failed') return 'Recording failed';
+  return 'Not available';
+}
+
+function ReplayPlayer({ replays }: { replays: StreamReplay[] }) {
+  const available = replays.filter((replay) => replay.status === 'ready' && replay.playbackUrl)
+    .sort((left, right) => new Date(left.startedAt ?? 0).getTime() - new Date(right.startedAt ?? 0).getTime());
+  const [selectedId, setSelectedId] = useState('');
+  useEffect(() => {
+    if (!available.some((replay) => replay.id === selectedId)) setSelectedId(available.at(-1)?.id ?? '');
+  }, [selectedId, available.map((item) => item.id).join('|')]);
+  const selectedIndex = available.findIndex((replay) => replay.id === selectedId);
+  const selected = selectedIndex >= 0 ? available[selectedIndex] : null;
+
+  return <section className="rail-card replay-card" aria-label="Livestream replays">
+    <div className="rail-card-head"><span className="rail-eyebrow"><Video size={13} /> LIVESTREAM REPLAYS</span><span>{available.length}</span></div>
+    <h3>Watch again.</h3>
+    {selected ? <>
+      <strong className="replay-title">{selected.title}</strong>
+      <PreciseReplayVideo replay={selected} className="replay-video" />
+      <div className="replay-controls">
+        <button type="button" className="secondary-button" onClick={() => setSelectedId(available[selectedIndex - 1].id)} disabled={selectedIndex <= 0}><ChevronLeft size={15} /> Previous</button>
+        <button type="button" className="secondary-button" onClick={() => setSelectedId(available[selectedIndex + 1].id)} disabled={selectedIndex >= available.length - 1}>Next <ChevronRight size={15} /></button>
+      </div>
+      <small className="replay-position">Replay {selectedIndex + 1} of {available.length}</small>
+    </> : <p>{replays.some((replay) => replay.status === 'recording')
+      ? 'Your latest replay is being prepared. Check back in a moment.'
+      : replays.length ? 'No replay is available for these older sessions.' : 'Completed livestreams will appear here for replay.'}</p>}
+  </section>;
+}
+
 function StreamTiles() {
   const tracks = useTracks([Track.Source.Camera, Track.Source.ScreenShare], { onlySubscribed: false });
   if (!tracks.length) return <div className="stream-no-video"><Video size={24} /><span>The livestream is connecting…</span></div>;
   return <div className="stream-tiles"><TrackLoop tracks={tracks}><ParticipantTile /></TrackLoop></div>;
+}
+
+function MemberStreamControls({ expanded, onToggleExpanded }: { expanded: boolean; onToggleExpanded: () => void }) {
+  const tracks = useTracks([Track.Source.Camera, Track.Source.ScreenShare], { onlySubscribed: false });
+  const [muted, setMuted] = useState(false);
+  const [volume, setVolume] = useState(1);
+  const stageRef = useRef<HTMLDivElement>(null);
+
+  async function toggleFullscreen() {
+    const stage = stageRef.current;
+    if (!stage) return;
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await stage.requestFullscreen();
+    } catch { /* fullscreen may be blocked */ }
+  }
+
+  async function togglePictureInPicture() {
+    const video = stageRef.current?.querySelector('video');
+    if (!video || !document.pictureInPictureEnabled) return;
+    try {
+      if (document.pictureInPictureElement) await document.exitPictureInPicture();
+      else await video.requestPictureInPicture();
+    } catch { /* picture-in-picture may be blocked */ }
+  }
+
+  return (
+    <div className="member-stream-controls">
+      <div className="member-stream-toolbar" role="group" aria-label="Livestream controls">
+        <button type="button" className="secondary-button" onClick={() => setMuted((value) => !value)} aria-pressed={muted} aria-label={muted ? 'Unmute stream' : 'Mute stream'} title={muted ? 'Unmute stream' : 'Mute stream'}>
+          {muted ? <VolumeX size={15} /> : <Volume2 size={15} />}
+        </button>
+        <input className="stream-volume" type="range" min={0} max={1} step={0.05} value={muted ? 0 : volume} onChange={(event) => {
+          const value = Number(event.target.value);
+          setVolume(value);
+          if (value > 0) setMuted(false);
+        }} aria-label="Stream volume" />
+        <button type="button" className="secondary-button" onClick={() => void togglePictureInPicture()} disabled={!tracks.length || !document.pictureInPictureEnabled} aria-label="Picture in picture" title="Picture in picture">
+          <PictureInPicture2 size={15} />
+        </button>
+        <button type="button" className="secondary-button" onClick={() => void toggleFullscreen()} aria-label="Fullscreen" title="Fullscreen">
+          <Maximize2 size={15} />
+        </button>
+        <button type="button" className="secondary-button" onClick={onToggleExpanded} aria-label={expanded ? 'Minimize player' : 'Expand player'} title={expanded ? 'Minimize player' : 'Expand player'}>
+          {expanded ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
+        </button>
+      </div>
+      <div className="livekit-stage" ref={stageRef}><StreamTiles /><RoomAudioRenderer muted={muted} volume={volume} /></div>
+    </div>
+  );
 }
 
 function LiveAttendeeCount() {

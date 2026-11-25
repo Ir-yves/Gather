@@ -11,7 +11,7 @@ A React + Express + MySQL community app with role-based admin tools, protected m
 ## Setup
 
 1. Install dependencies from the project root with `npm install`.
-2. Create the database and tables by running `server/schema.sql` with your MySQL client. For an existing installation, run migrations `001_content_assets.sql`, `002_reactions.sql`, `003_analytics_views.sql`, `004_private_messages.sql`, `005_private_conversation_pairs.sql`, `006_group_conversations_and_replies.sql`, and `007_account_and_site_settings.sql` in order.
+2. Create the database and tables by running `server/schema.sql` with your MySQL client. For an existing installation, run migrations `001_content_assets.sql` through `008_livestream_recordings.sql` in numeric order.
 3. Copy `server/.env.example` to `server/.env`, then set the MySQL credentials, a unique long `JWT_SECRET`, and the LiveKit URL/key/secret.
 4. Create an admin account by registering normally, then promote that account in MySQL:
 
@@ -23,12 +23,14 @@ A React + Express + MySQL community app with role-based admin tools, protected m
 
 The client uses the LiveKit Cloud URL from the API configuration. Admins can start a broadcast from the Live page, publish their camera/microphone or share their screen, and end the room for everyone. Keep the admin Live page open during the broadcast. Logged-in members see the active room on their community page and can join as viewers; regular member tokens cannot publish. LiveKit credentials and room tokens are never exposed to the browser as API secrets.
 
+Livestream replay requires a private S3-compatible bucket and LiveKit Egress. Set `RECORDING_S3_REGION`, `RECORDING_S3_BUCKET`, `RECORDING_S3_ACCESS_KEY`, and `RECORDING_S3_SECRET_KEY`; optionally set `RECORDING_S3_ENDPOINT` for non-AWS providers. The storage credentials need `s3:PutObject` for LiveKit Egress and `s3:GetObject` for authenticated playback links; keep the bucket private. New streams are automatically recorded. Members can pause, seek, and move between completed replays; authenticated playback links expire after 10 minutes. Streams ended before recording was configured cannot be replayed.
+
 ## Production deployment (Vercel, Render, and Aiven)
 
 The repository includes a Vercel configuration for the client and a Render Blueprint for the API. The Render Blueprint uses a paid Starter web service and a 1 GB persistent disk for uploaded documents/videos; without persistent storage, uploads would be lost when Render replaces the service.
 
 1. Push this repository to GitHub and import it into Vercel and Render from the repository root.
-2. In Aiven, use a MySQL service and create the application database. Apply `server/schema.sql`, followed by migrations `001_content_assets.sql` through `007_account_and_site_settings.sql` in numeric order. Set the Aiven hostname, port, username, password, and database name in the Render service environment.
+2. In Aiven, use a MySQL service and create the application database. Apply `server/schema.sql`, followed by migrations `001_content_assets.sql` through `008_livestream_recordings.sql` in numeric order. Set the Aiven hostname, port, username, password, and database name in the Render service environment.
 3. Download the Aiven CA certificate and set its contents as `MYSQL_SSL_CA` in Render. The API requires this certificate in production and verifies the database TLS connection.
 4. Configure the Render Blueprint’s `CLIENT_ORIGIN` as the exact deployed Vercel origin (scheme and hostname, with no trailing path). Set the LiveKit URL, API key, and secret in Render if livestreaming is enabled. Keep provider secrets in their dashboards, never in Git.
 5. In Vercel, set `VITE_API_URL` to `https://<render-host>/api` and `VITE_SOCKET_URL` to `https://<render-host>`, then redeploy the client. The Vercel rewrite serves the React app for client-side routes.

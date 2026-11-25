@@ -19,7 +19,12 @@ const configSchema = z.object({
   MYSQL_SSL_CA: z.string().default(''),
   LIVEKIT_URL: z.string().default(''),
   LIVEKIT_API_KEY: z.string().default(''),
-  LIVEKIT_API_SECRET: z.string().default('')
+  LIVEKIT_API_SECRET: z.string().default(''),
+  RECORDING_S3_ENDPOINT: z.string().default(''),
+  RECORDING_S3_REGION: z.string().default(''),
+  RECORDING_S3_BUCKET: z.string().default(''),
+  RECORDING_S3_ACCESS_KEY: z.string().default(''),
+  RECORDING_S3_SECRET_KEY: z.string().default('')
 }).superRefine((values, context) => {
   if (values.NODE_ENV === 'production' && !values.MYSQL_SSL_CA.trim()) {
     context.addIssue({
@@ -32,6 +37,11 @@ const configSchema = z.object({
 
 export const config = configSchema.parse(process.env);
 export const isProduction = config.NODE_ENV === 'production';
+
+export function isStreamRecordingConfigured(): boolean {
+  return Boolean(config.RECORDING_S3_REGION && config.RECORDING_S3_BUCKET
+    && config.RECORDING_S3_ACCESS_KEY && config.RECORDING_S3_SECRET_KEY);
+}
 
 export function isLiveKitConfigured(): boolean {
   if (!config.LIVEKIT_API_KEY || !config.LIVEKIT_API_SECRET) return false;

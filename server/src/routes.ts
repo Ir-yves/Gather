@@ -1,13 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID } from 'node:crypto';
 import { unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { Router, type Response } from 'express';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
-import { AccessToken, RoomServiceClient } from 'livekit-server-sdk';
+import { AccessToken, EgressClient, EncodedFileOutput, EncodedFileType, RoomServiceClient, S3Upload } from 'livekit-server-sdk';
 import { rateLimit } from 'express-rate-limit';
 import type { RowDataPacket, ResultSetHeader } from 'mysql2';
-import { config, isLiveKitConfigured } from './config.js';
+import { config, isLiveKitConfigured, isStreamRecordingConfigured } from './config.js';
 import { clearSessionCookie, requireAuth, requireRole, setSessionCookie } from './auth.js';
 import { db } from './db.js';
 import { createNotifications, type NotificationCategory } from './notifications.js';
@@ -942,7 +942,8 @@ router.get('/stream', requireAuth, asyncHandler(async (req, res) => {
       likesCount: Number(stream.likes_count),
       liked: Number(stream.liked) > 0
     } : null,
-    livekitUrl: config.LIVEKIT_URL
+    livekitUrl: config.LIVEKIT_URL,
+    recordingEnabled: isStreamRecordingConfigured()
   });
 }));
 
@@ -1003,18 +1004,47 @@ router.post('/admin/stream/start', requireAuth, requireRole('admin'), asyncHandl
   const id = randomUUID();
   const roomName = `stream-${id}`;
   const roomService = new RoomServiceClient(livekitHttpUrl(), config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET);
+  const egressClient = new EgressClient(livekitHttpUrl(), config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET);
   try {
     await roomService.createRoom({ name: roomName, emptyTimeout: 3600 });
   } catch (error) {
     if (respondToLiveKitAuthError(res, error)) return;
     throw error;
   }
+  let recordingEgressId: string | null = null;
+  const recordingPath = isStreamRecordingConfigured() ? `livestream-replays/${id}.mp4` : null;
+  let recordingStatus: 'recording' | 'unavailable' = 'unavailable';
   try {
+    if (recordingPath) {
+      const recording = await egressClient.startRoomCompositeEgress(roomName, {
+      file: new EncodedFileOutput({
+        fileType: EncodedFileType.MP4,
+        filepath: `livestream-replays/${id}.mp4`,
+        output: {
+          case: 's3',
+          value: new S3Upload({
+            accessKey: config.RECORDING_S3_ACCESS_KEY,
+            secret: config.RECORDING_S3_SECRET_KEY,
+            bucket: config.RECORDING_S3_BUCKET,
+            region: config.RECORDING_S3_REGION,
+            endpoint: config.RECORDING_S3_ENDPOINT || `https://s3.${config.RECORDING_S3_REGION}.amazonaws.com`,
+            forcePathStyle: true
+          })
+        }
+      })
+      });
+      recordingEgressId = recording.egressId;
+      recordingStatus = 'recording';
+    }
     await db.execute(
-      'INSERT INTO livestreams (id, room_name, title, active, started_at, created_by) VALUES (?, ?, ?, TRUE, NOW(), ?)',
-      [id, roomName, title, currentUser(req as AuthRequest).id]
+      `INSERT INTO livestreams (id, room_name, title, active, started_at, recording_egress_id, recording_path, recording_status, created_by)
+       VALUES (?, ?, ?, TRUE, NOW(), ?, ?, ?, ?)`,
+      [id, roomName, title, recordingEgressId, recordingPath, recordingStatus, currentUser(req as AuthRequest).id]
     );
   } catch (error) {
+    if (recordingEgressId) {
+      try { await egressClient.stopEgress(recordingEgressId); } catch { /* Egress may already have stopped. */ }
+    }
     await roomService.deleteRoom(roomName);
     throw error;
   }
@@ -1030,12 +1060,20 @@ router.post('/admin/stream/start', requireAuth, requireRole('admin'), asyncHandl
 router.post('/admin/stream/end', requireAuth, requireRole('admin'), asyncHandler(async (_req, res) => {
   if (!ensureLiveKitConfigured(res)) return;
   const [rows] = await db.execute<StreamRow[]>(
-    'SELECT id, room_name FROM livestreams WHERE active = TRUE ORDER BY started_at DESC LIMIT 1'
-  );
+    'SELECT id, room_name, recording_egress_id FROM livestreams WHERE active = TRUE ORDER BY started_at DESC LIMIT 1'
+  ) as [Array<StreamRow & { recording_egress_id: string | null }>, any];
   const stream = rows[0];
   if (!stream) {
     res.status(404).json({ error: 'There is no active livestream.' });
     return;
+  }
+  if (stream.recording_egress_id) {
+    const egressClient = new EgressClient(livekitHttpUrl(), config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET);
+    try {
+      await egressClient.stopEgress(stream.recording_egress_id);
+    } catch (error) {
+      console.error('Unable to stop livestream recording cleanly:', error);
+    }
   }
   const roomService = new RoomServiceClient(livekitHttpUrl(), config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET);
   try {
@@ -1046,6 +1084,55 @@ router.post('/admin/stream/end', requireAuth, requireRole('admin'), asyncHandler
   }
   await db.execute('UPDATE livestreams SET active = FALSE, ended_at = NOW() WHERE id = ?', [stream.id]);
   res.json({ success: true });
+}));
+
+router.get('/stream/replays', requireAuth, asyncHandler(async (_req, res) => {
+  const [pending] = await db.execute<Array<RowDataPacket & {
+    id: string; recording_egress_id: string; recording_path: string | null;
+  }>>(
+    `SELECT id, recording_egress_id, recording_path FROM livestreams
+     WHERE recording_status = 'recording' AND recording_egress_id IS NOT NULL`
+  );
+  if (pending.length && isLiveKitConfigured()) {
+    const egressClient = new EgressClient(livekitHttpUrl(), config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET);
+    for (const stream of pending) {
+      try {
+        const [info] = await egressClient.listEgress({ egressId: stream.recording_egress_id });
+        if (!info) continue;
+        if (info.status === 4 || info.status === 5 || info.status === 6) {
+          await db.execute(`UPDATE livestreams SET recording_status = 'failed' WHERE id = ?`, [stream.id]);
+          continue;
+        }
+        if (info.status !== 3) continue;
+        // LiveKit can report COMPLETE with empty fileResults for S3 outputs. Trust a
+        // completed egress with a known object key; only downgrade when storage
+        // definitively reports the object missing.
+        const exists = stream.recording_path ? await recordingObjectExists(stream.recording_path) : null;
+        const status = exists === false ? 'failed' : 'ready';
+        await db.execute(
+          `UPDATE livestreams SET recording_status = ? WHERE id = ? AND recording_status = 'recording'`,
+          [status, stream.id]
+        );
+      } catch (error) {
+        console.error('Unable to refresh livestream recording status:', error);
+      }
+    }
+  }
+  const [rows] = await db.execute<Array<RowDataPacket & {
+    id: string; title: string; started_at: Date | null; ended_at: Date | null;
+    recording_path: string | null; recording_status: string;
+  }>>(
+    `SELECT id, title, started_at, ended_at, recording_path, recording_status
+     FROM livestreams WHERE active = FALSE ORDER BY started_at DESC LIMIT 100`
+  );
+  res.json({ replays: rows.map((row) => ({
+    id: row.id,
+    title: row.title,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    status: row.recording_status,
+    playbackUrl: row.recording_status === 'ready' && row.recording_path ? signRecordingUrl(row.recording_path) : null
+  })) });
 }));
 
 router.post('/stream/token', requireAuth, asyncHandler(async (req, res) => {
@@ -1099,6 +1186,53 @@ router.post('/stream/view', requireAuth, asyncHandler(async (req, res) => {
 function currentUser(req: AuthRequest): AuthUser {
   if (!req.user) throw new Error('Authenticated user is missing from request.');
   return req.user;
+}
+
+function signRecordingUrl(objectKey: string, method: 'GET' | 'HEAD' = 'GET'): string {
+  const region = config.RECORDING_S3_REGION;
+  const bucket = config.RECORDING_S3_BUCKET;
+  const endpoint = new URL(config.RECORDING_S3_ENDPOINT || `https://s3.${region}.amazonaws.com`);
+  const endpointPrefix = endpoint.pathname.replace(/\/$/, '');
+  const encode = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+  const canonicalUri = `${endpointPrefix}/${encode(bucket)}/${objectKey.split('/').map(encode).join('/')}`;
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const scope = `${dateStamp}/${region}/s3/aws4_request`;
+  const queryValues: Array<[string, string]> = [
+    ['X-Amz-Algorithm', 'AWS4-HMAC-SHA256'],
+    ['X-Amz-Credential', `${config.RECORDING_S3_ACCESS_KEY}/${scope}`],
+    ['X-Amz-Date', amzDate],
+    ['X-Amz-Expires', '600'],
+    ['X-Amz-SignedHeaders', 'host']
+  ];
+  const canonicalQuery = queryValues.map(([key, value]) => [encode(key), encode(value)] as const)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`).join('&');
+  const canonicalRequest = `${method}\n${canonicalUri}\n${canonicalQuery}\nhost:${endpoint.host}\n\nhost\nUNSIGNED-PAYLOAD`;
+  const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+  const hmac = (key: Buffer | string, value: string) => createHmac('sha256', key).update(value).digest();
+  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${hash(canonicalRequest)}`;
+  const signingKey = hmac(hmac(hmac(hmac(`AWS4${config.RECORDING_S3_SECRET_KEY}`, dateStamp), region), 's3'), 'aws4_request');
+  const signature = createHmac('sha256', signingKey).update(stringToSign).digest('hex');
+  const finalQuery = `${canonicalQuery}&X-Amz-Signature=${signature}`;
+  return `${endpoint.origin}${canonicalUri}?${finalQuery}`;
+}
+
+// Returns null when the storage provider cannot be reached or does not support
+// the verification request (some S3-compatible services reject HEAD). A null
+// result is inconclusive and must not turn a completed egress into a failure.
+async function recordingObjectExists(objectKey: string): Promise<boolean | null> {
+  if (!isStreamRecordingConfigured()) return null;
+  try {
+    const response = await fetch(signRecordingUrl(objectKey, 'HEAD'), { method: 'HEAD' });
+    if (response.ok) return true;
+    if (response.status === 404) return false;
+    return null;
+  } catch (error) {
+    console.error('Unable to verify livestream recording:', error);
+    return null;
+  }
 }
 
 async function withContentAssets(rows: ContentRow[], userId: string) {

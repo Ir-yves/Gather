@@ -134,3 +134,12 @@ export interface Stream {
   likesCount: number;
   liked: boolean;
 }
+
+export interface StreamReplay {
+  id: string;
+  title: string;
+  startedAt: string | null;
+  endedAt: string | null;
+  status: 'recording' | 'ready' | 'failed' | 'unavailable';
+  playbackUrl: string | null;
+}

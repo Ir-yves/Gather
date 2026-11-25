@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import {
-  Bell, Building2, Check, Globe, KeyRound, Moon, Shield, Sun, UserRound, Users
+  Bell, Building2, Check, Globe, KeyRound, Moon, Pencil, Shield, Sun, UserRound, Users
 } from 'lucide-react';
 import { api } from './api';
 import type { SiteSettings, UserPreferences } from './api';
@@ -16,12 +16,14 @@ export function SettingsPage() {
   const { user, preferences, siteSettings, refresh, savePreferences, saveSiteSettings } = useAuth();
   const [name, setName] = useState(user?.name ?? '');
   const [email, setEmail] = useState(user?.email ?? '');
+  const [editingProfile, setEditingProfile] = useState(false);
   const [profileBusy, setProfileBusy] = useState(false);
   const [profileError, setProfileError] = useState('');
   const [profileNotice, setProfileNotice] = useState('');
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [editingPassword, setEditingPassword] = useState(false);
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordError, setPasswordError] = useState('');
   const [passwordNotice, setPasswordNotice] = useState('');
@@ -63,11 +65,20 @@ export function SettingsPage() {
       });
       await refresh();
       setProfileNotice('Your profile has been updated.');
+      setEditingProfile(false);
     } catch (reason) {
       setProfileError(reason instanceof Error ? reason.message : 'Unable to update your profile.');
     } finally {
       setProfileBusy(false);
     }
+  }
+
+  function cancelProfileEdit() {
+    setName(user?.name ?? '');
+    setEmail(user?.email ?? '');
+    setProfileError('');
+    setProfileNotice('');
+    setEditingProfile(false);
   }
 
   async function changePassword(event: FormEvent<HTMLFormElement>) {
@@ -92,11 +103,21 @@ export function SettingsPage() {
       setNewPassword('');
       setConfirmPassword('');
       setPasswordNotice('Your password has been changed.');
+      setEditingPassword(false);
     } catch (reason) {
       setPasswordError(reason instanceof Error ? reason.message : 'Unable to change your password.');
     } finally {
       setPasswordBusy(false);
     }
+  }
+
+  function cancelPasswordEdit() {
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setPasswordError('');
+    setPasswordNotice('');
+    setEditingPassword(false);
   }
 
   async function saveNotificationPreferences(event: FormEvent<HTMLFormElement>) {
@@ -145,25 +166,40 @@ export function SettingsPage() {
 
       <section className="admin-panel settings-card">
         <header className="settings-card-heading"><span><UserRound size={18} /></span><div><h2>Profile details</h2><p>Update the name and email address associated with your account.</p></div></header>
-        <form className="settings-form" onSubmit={(event) => void saveProfile(event)}>
-          <label><span className="field-label">Display name</span><input className="settings-input" value={name} onChange={(event) => setName(event.target.value)} minLength={2} maxLength={100} autoComplete="name" required /></label>
-          <label><span className="field-label">Email address</span><input className="settings-input" type="email" value={email} onChange={(event) => setEmail(event.target.value)} maxLength={254} autoComplete="email" required /></label>
-          <SettingsError>{profileError}</SettingsError>
-          {profileNotice && <span className="settings-success" role="status"><Check size={14} />{profileNotice}</span>}
-          <div className="settings-form-footer"><span>Changing your email updates your sign-in address.</span><button className="button-primary" type="submit" disabled={profileBusy || (name === user?.name && email === user?.email)}>{profileBusy ? 'Saving…' : 'Save profile'}</button></div>
-        </form>
+        {profileNotice && <span className="settings-success settings-notice" role="status"><Check size={14} />{profileNotice}</span>}
+        {!editingProfile ? (
+          <div className="settings-summary">
+            <div className="settings-readonly"><span className="field-label">Display name</span><strong>{user?.name ?? '—'}</strong></div>
+            <div className="settings-readonly"><span className="field-label">Email address</span><strong>{user?.email ?? '—'}</strong></div>
+            <button type="button" className="secondary-button settings-change-button" onClick={() => { setProfileNotice(''); setProfileError(''); setEditingProfile(true); }}><Pencil size={15} /> Change profile</button>
+          </div>
+        ) : (
+          <form className="settings-form settings-edit-form" onSubmit={(event) => void saveProfile(event)}>
+            <label><span className="field-label">Display name</span><input className="settings-input" value={name} onChange={(event) => setName(event.target.value)} minLength={2} maxLength={100} autoComplete="name" required /></label>
+            <label><span className="field-label">Email address</span><input className="settings-input" type="email" value={email} onChange={(event) => setEmail(event.target.value)} maxLength={254} autoComplete="email" required /></label>
+            <SettingsError>{profileError}</SettingsError>
+            <div className="settings-form-footer"><span>Changing your email updates your sign-in address.</span><div className="settings-form-actions"><button type="button" className="text-icon-button" onClick={cancelProfileEdit}>Cancel</button><button className="button-primary" type="submit" disabled={profileBusy || (name === user?.name && email === user?.email)}>{profileBusy ? 'Saving…' : 'Save profile'}</button></div></div>
+          </form>
+        )}
       </section>
 
       <section className="admin-panel settings-card">
-        <header className="settings-card-heading"><span><KeyRound size={18} /></span><div><h2>Password & security</h2><p>Use your current password to set a new one. New passwords need at least 12 characters.</p></div></header>
-        <form className="settings-form settings-password-form" onSubmit={(event) => void changePassword(event)}>
-          <label><span className="field-label">Current password</span><input className="settings-input" type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" required /></label>
-          <label><span className="field-label">New password</span><input className="settings-input" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} minLength={12} maxLength={128} autoComplete="new-password" required /></label>
-          <label><span className="field-label">Confirm new password</span><input className="settings-input" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} minLength={12} maxLength={128} autoComplete="new-password" required /></label>
-          <SettingsError>{passwordError}</SettingsError>
-          {passwordNotice && <span className="settings-success" role="status"><Check size={14} />{passwordNotice}</span>}
-          <div className="settings-form-footer"><span>Your password is never shown or emailed.</span><button className="button-primary" type="submit" disabled={passwordBusy}>{passwordBusy ? 'Changing…' : 'Change password'}</button></div>
-        </form>
+        <header className="settings-card-heading"><span><KeyRound size={18} /></span><div><h2>Password &amp; security</h2><p>Use your current password to set a new one. New passwords need at least 12 characters.</p></div></header>
+        {passwordNotice && <span className="settings-success settings-notice" role="status"><Check size={14} />{passwordNotice}</span>}
+        {!editingPassword ? (
+          <div className="settings-summary">
+            <div className="settings-readonly"><span className="field-label">Password</span><strong>••••••••••••</strong></div>
+            <button type="button" className="secondary-button settings-change-button" onClick={() => { setPasswordNotice(''); setPasswordError(''); setEditingPassword(true); }}><KeyRound size={15} /> Change password</button>
+          </div>
+        ) : (
+          <form className="settings-form settings-password-form settings-edit-form" onSubmit={(event) => void changePassword(event)}>
+            <label><span className="field-label">Current password</span><input className="settings-input" type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" required /></label>
+            <label><span className="field-label">New password</span><input className="settings-input" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} minLength={12} maxLength={128} autoComplete="new-password" required /></label>
+            <label><span className="field-label">Confirm new password</span><input className="settings-input" type="password" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} minLength={12} maxLength={128} autoComplete="new-password" required /></label>
+            <SettingsError>{passwordError}</SettingsError>
+            <div className="settings-form-footer"><span>Your password is never shown or emailed.</span><div className="settings-form-actions"><button type="button" className="text-icon-button" onClick={cancelPasswordEdit}>Cancel</button><button className="button-primary" type="submit" disabled={passwordBusy}>{passwordBusy ? 'Changing…' : 'Change password'}</button></div></div>
+          </form>
+        )}
       </section>
 
       <section className="admin-panel settings-card">
